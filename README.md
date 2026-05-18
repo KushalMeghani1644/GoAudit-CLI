@@ -21,7 +21,7 @@ Verdict: WARNING
 ## Install 
 
 ```zsh
-go install github.com/yourusername/goaudit@latest
+go install github.com/KushalMeghani1644/goAudit-CLI@latest
 ```
 
 ## Usage
