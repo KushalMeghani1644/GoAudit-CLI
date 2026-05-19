@@ -20,9 +20,15 @@ var (
 
 	readCriticalPaths  = regexp.MustCompile(`(?i)(.*?/\.env|.*?/\.ssh/.*?|.*?/\.aws/.*?|.*?/\.kube/.*?|.*?id_rsa)`)
 	writeCriticalPaths = regexp.MustCompile(`(?i)(.*?/\.bashrc|.*?/\.zshrc|.*?/\.profile|^/etc/crontab|^/etc/cron\..*|^/usr/local/bin/.*|^/usr/bin/.*)`)
-	writeAllowedPaths  = regexp.MustCompile(`(?i)(^/tmp/|^/dev/|^/proc/|^/sys/|^/workspace/|node_modules/|\.npm/|\.cache/|site-packages/|/var/tmp/|/pnpm/store/|pnpm-state\.json|^/usr/local/lib/|^/usr/lib/|(^|/)package(-lock)?\.json$|(^|/)pnpm-lock\.yaml$|(^|/)bun\.lockb?$|\.hm$)`)
+	writeAllowedPaths  = regexp.MustCompile(`(?i)(^/tmp/|^/dev/|^/proc/|^/sys/|^/workspace/|node_modules/|\.npm/|\.cache/|site-packages/|/var/tmp/|/pnpm/store/|pnpm-state\.json|^/usr/local/lib/|^/usr/lib/|(^|/)package(-lock)?\.json$|(^|/)pnpm-lock\.yaml$|(^|/)bun\.lockb?$|\.hm$|^/root/\.config/|^/home/.*?/\.config/|^/root/\.local/|^/home/.*?/\.local/|^/root/\.bun/|^/home/.*?/\.bun/)`)
 
 	execSuspiciousBinaries = regexp.MustCompile(`(?i)(.*?/nc$|.*?/ncat$|.*?/netcat$|^/tmp/.*)`)
+
+	// New detection patterns for expanded strace coverage.
+	symlinkRegex       = regexp.MustCompile(`(?i)(?:symlink|symlinkat)\("(.*?)",\s*(?:\d+,\s*)?"(.*?)"`)
+	memfdRegex         = regexp.MustCompile(`(?i)memfd_create\("(.*?)"`)
+	ptraceAttachRegex  = regexp.MustCompile(`(?i)ptrace\(PTRACE_(?:ATTACH|SEIZE)`)
+	bindListenRegex    = regexp.MustCompile(`(?:bind|listen)\(\d+,\s*\{sa_family=AF_INET6?,\s*sin6?_port=htons\((\d+)\)`)
 )
 
 func ParseStream(r io.Reader, reporter *report.Reporter) ([]report.Finding, error) {
@@ -202,6 +208,78 @@ func ParseStream(r io.Reader, reporter *report.Reporter) ([]report.Finding, erro
 			}
 			findings = append(findings, f)
 			reporter.PrintLiveFinding(f)
+			continue
+		}
+
+		// Match symlink creation targeting sensitive paths.
+		if symlinkMatches := symlinkRegex.FindStringSubmatch(line); len(symlinkMatches) > 2 {
+			target := symlinkMatches[1]
+			linkPath := symlinkMatches[2]
+			if readCriticalPaths.MatchString(target) || writeCriticalPaths.MatchString(target) ||
+				readCriticalPaths.MatchString(linkPath) || writeCriticalPaths.MatchString(linkPath) {
+				f := report.Finding{
+					Severity:   report.SeverityCritical,
+					Type:       "fs_write",
+					ReasonCode: "SYMLINK_SENSITIVE_PATH",
+					Path:       linkPath + " -> " + target,
+					Confidence: 90,
+					Evidence:   "Symlink created targeting a sensitive file path",
+				}
+				findings = append(findings, f)
+				reporter.PrintLiveFinding(f)
+			}
+			continue
+		}
+
+		// Match memfd_create — fileless execution attempt.
+		if memfdRegex.MatchString(line) {
+			name := ""
+			if m := memfdRegex.FindStringSubmatch(line); len(m) > 1 {
+				name = m[1]
+			}
+			f := report.Finding{
+				Severity:   report.SeverityCritical,
+				Type:       "exec",
+				ReasonCode: "FILELESS_EXEC",
+				Path:       name,
+				Confidence: 92,
+				Evidence:   "memfd_create detected — possible fileless code execution",
+			}
+			findings = append(findings, f)
+			reporter.PrintLiveFinding(f)
+			continue
+		}
+
+		// Match ptrace attach — process injection.
+		if ptraceAttachRegex.MatchString(line) {
+			f := report.Finding{
+				Severity:   report.SeverityCritical,
+				Type:       "exec",
+				ReasonCode: "PROCESS_INJECTION",
+				Path:       line,
+				Confidence: 95,
+				Evidence:   "ptrace ATTACH/SEIZE detected — possible process injection",
+			}
+			findings = append(findings, f)
+			reporter.PrintLiveFinding(f)
+			continue
+		}
+
+		// Match bind/listen — potential backdoor listener.
+		if blMatches := bindListenRegex.FindStringSubmatch(line); len(blMatches) > 1 {
+			port, _ := strconv.Atoi(blMatches[1])
+			if port > 0 {
+				f := report.Finding{
+					Severity:   report.SeverityWarning,
+					Type:       "network",
+					ReasonCode: "BACKDOOR_LISTENER",
+					Port:       port,
+					Confidence: 80,
+					Evidence:   "Process binding/listening on a network port inside sandbox",
+				}
+				findings = append(findings, f)
+				reporter.PrintLiveFinding(f)
+			}
 			continue
 		}
 

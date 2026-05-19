@@ -5,13 +5,22 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KushalMeghani1644/goaudit/internal/report"
 )
 
 var npmRegistryBaseURL = "https://registry.npmjs.org"
+
+const (
+	registryWorkerCount = 8
+	registryStagger     = 50 * time.Millisecond
+	cliRegistrySpecCap  = 3
+)
 
 type npmMetadata struct {
 	DistTags map[string]string `json:"dist-tags"`
@@ -36,7 +45,7 @@ func AnalyzeNPMInstall(command string) []report.Finding {
 	if len(specs) == 0 {
 		return nil
 	}
-	return analyzeRegistryBackedSpecs(specs, "npm")
+	return analyzeRegistryBackedSpecs(specs, "npm", cliRegistrySpecCap)
 }
 
 func analyzePNPMInstall(command string) []report.Finding {
@@ -44,7 +53,7 @@ func analyzePNPMInstall(command string) []report.Finding {
 	if len(specs) == 0 {
 		return nil
 	}
-	return analyzeRegistryBackedSpecs(specs, "pnpm")
+	return analyzeRegistryBackedSpecs(specs, "pnpm", cliRegistrySpecCap)
 }
 
 func analyzeBUNAdd(command string) []report.Finding {
@@ -52,76 +61,157 @@ func analyzeBUNAdd(command string) []report.Finding {
 	if len(specs) == 0 {
 		return nil
 	}
-	return analyzeRegistryBackedSpecs(specs, "bun")
+	return analyzeRegistryBackedSpecs(specs, "bun", cliRegistrySpecCap)
 }
 
-func analyzeRegistryBackedSpecs(specs []string, manager string) []report.Finding {
-	client := &http.Client{Timeout: 8 * time.Second}
-	var findings []report.Finding
-	for i, spec := range specs {
-		if i >= 3 {
-			break
-		}
-		if isNonRegistryNpmSpec(spec) {
-			findings = append(findings, report.Finding{
-				Severity:   report.SeverityWarning,
-				Type:       manager,
-				ReasonCode: managerReason(manager, "NON_REGISTRY_SOURCE"),
-				Path:       spec,
-				Confidence: 85,
-				Evidence:   "Package source is not a standard npm registry reference",
-			})
-			continue
-		}
-
-		pkg := normalizeNPMPackageName(spec)
+func AnalyzeRegistryPackages(pkgs []string, manager string) []report.Finding {
+	specs := make([]string, 0, len(pkgs))
+	seen := make(map[string]struct{})
+	for _, pkg := range pkgs {
+		pkg = strings.TrimSpace(pkg)
 		if pkg == "" {
 			continue
 		}
-		meta, err := fetchNPMMetadata(client, pkg)
-		if err != nil {
+		if _, ok := seen[pkg]; ok {
+			continue
+		}
+		seen[pkg] = struct{}{}
+		specs = append(specs, pkg)
+	}
+	sort.Strings(specs)
+	return analyzeRegistryBackedSpecs(specs, manager, 0)
+}
+
+func analyzeRegistryBackedSpecs(specs []string, manager string, cap int) []report.Finding {
+	if len(specs) == 0 {
+		return nil
+	}
+
+	if cap > 0 && len(specs) > cap {
+		specs = specs[:cap]
+	}
+
+	client := &http.Client{Timeout: 8 * time.Second}
+	jobs := make(chan string)
+	var (
+		mu       sync.Mutex
+		findings []report.Finding
+		wg       sync.WaitGroup
+		jobSeq   atomic.Uint64
+	)
+
+	workers := registryWorkerCount
+	if len(specs) < workers {
+		workers = len(specs)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for spec := range jobs {
+				seq := jobSeq.Add(1)
+				time.Sleep(time.Duration(seq) * registryStagger)
+				pkgFindings := analyzeRegistrySpec(client, spec, manager)
+				if len(pkgFindings) == 0 {
+					continue
+				}
+				mu.Lock()
+				findings = append(findings, pkgFindings...)
+				mu.Unlock()
+			}
+		}()
+	}
+
+	for _, spec := range specs {
+		jobs <- spec
+	}
+	close(jobs)
+	wg.Wait()
+
+	return findings
+}
+
+func analyzeRegistrySpec(client *http.Client, spec, manager string) []report.Finding {
+	var findings []report.Finding
+	if isNonRegistryNpmSpec(spec) {
+		findings = append(findings, report.Finding{
+			Severity:   report.SeverityWarning,
+			Type:       manager,
+			ReasonCode: managerReason(manager, "NON_REGISTRY_SOURCE"),
+			Path:       spec,
+			Confidence: 85,
+			Evidence:   "Package source is not a standard npm registry reference",
+		})
+		return findings
+	}
+
+	pkg := normalizeNPMPackageName(spec)
+	if pkg == "" {
+		return nil
+	}
+	meta, err := fetchNPMMetadata(client, pkg)
+	if err != nil {
+		findings = append(findings, report.Finding{
+			Severity:   report.SeverityWarning,
+			Type:       manager,
+			ReasonCode: managerReason(manager, "INCONCLUSIVE_METADATA"),
+			Path:       pkg,
+			Confidence: 45,
+			Evidence:   err.Error(),
+		})
+		return findings
+	}
+
+	latest := meta.DistTags["latest"]
+	if latest != "" {
+		if version, ok := meta.Versions[latest]; ok {
+			lifecycleScripts := []string{"preinstall", "install", "postinstall", "prepare"}
+			foundLifecycle := false
+			for _, scriptName := range lifecycleScripts {
+				scriptContent, exists := version.Scripts[scriptName]
+				if !exists {
+					continue
+				}
+				if !foundLifecycle {
+					findings = append(findings, report.Finding{
+						Severity:   report.SeverityWarning,
+						Type:       manager,
+						ReasonCode: managerReason(manager, "LIFECYCLE_SCRIPT_METADATA"),
+						Path:       pkg + "@" + latest,
+						Confidence: 80,
+						Evidence:   fmt.Sprintf("Latest package version defines %s script", scriptName),
+					})
+					foundLifecycle = true
+				}
+				// Analyze the actual content of the lifecycle script for dangerous patterns.
+				contentFindings := analyzeScriptBody(
+					fmt.Sprintf("%s@%s:%s", pkg, latest, scriptName),
+					strings.ToLower(scriptContent),
+				)
+				for i := range contentFindings {
+					contentFindings[i].Type = manager
+					contentFindings[i].ReasonCode = managerReason(manager, "LIFECYCLE_"+contentFindings[i].ReasonCode)
+				}
+				findings = append(findings, contentFindings...)
+			}
+		}
+	}
+
+	if meta.Time.Created != "" {
+		createdAt, err := time.Parse(time.RFC3339, meta.Time.Created)
+		if err == nil && time.Since(createdAt) < 14*24*time.Hour {
 			findings = append(findings, report.Finding{
 				Severity:   report.SeverityWarning,
 				Type:       manager,
-				ReasonCode: managerReason(manager, "INCONCLUSIVE_METADATA"),
+				ReasonCode: managerReason(manager, "RECENT_PACKAGE"),
 				Path:       pkg,
-				Confidence: 45,
-				Evidence:   err.Error(),
+				Confidence: 70,
+				Evidence:   "Package was created recently on npm registry",
 			})
-			continue
-		}
-
-		latest := meta.DistTags["latest"]
-		if latest != "" {
-			if version, ok := meta.Versions[latest]; ok {
-				for scriptName := range version.Scripts {
-					if scriptName == "preinstall" || scriptName == "install" || scriptName == "postinstall" || scriptName == "prepare" {
-						findings = append(findings, report.Finding{
-							Severity:   report.SeverityWarning,
-							Type:       manager,
-							ReasonCode: managerReason(manager, "LIFECYCLE_SCRIPT_METADATA"),
-							Path:       pkg + "@" + latest,
-							Confidence: 80,
-							Evidence:   fmt.Sprintf("Latest package version defines %s script", scriptName),
-						})
-						break
-					}
-				}
-			}
-		}
-
-		if meta.Time.Created != "" {
-			createdAt, err := time.Parse(time.RFC3339, meta.Time.Created)
-			if err == nil && time.Since(createdAt) < 14*24*time.Hour {
-				findings = append(findings, report.Finding{
-					Severity:   report.SeverityWarning,
-					Type:       manager,
-					ReasonCode: managerReason(manager, "RECENT_PACKAGE"),
-					Path:       pkg,
-					Confidence: 70,
-					Evidence:   "Package was created recently on npm registry",
-				})
-			}
 		}
 	}
 	return findings

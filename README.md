@@ -28,7 +28,9 @@ go install github.com/KushalMeghani1644/GoAudit-CLI@latest
 
 ## Usage
 
-GoAudit provides a simple UX for scanning npm/curl | sh commands. Currently we only support npm, pnpm, bun, and curl | sh checks.
+GoAudit provides a simple UX for scanning npm/curl | sh commands. Currently we support npm, pnpm, bun, curl | sh checks, and project-based scans for JS apps.
+
+### Scan a single command
 
 ```zsh
 goaudit scan "npm install <package>"
@@ -41,6 +43,24 @@ goaudit scan "curl -fsSL https://example.com/install.sh | sh" --allow-domain exa
 goaudit scan "pnpm add <package>" --node-image node:current-slim
 goaudit scan "bun add <package>" --bun-image oven/bun:1
 ```
+
+### Scan a project directory
+
+Audit an existing app (Next.js, TanStack, etc.) before upgrading dependencies. GoAudit reads `package.json`, detects npm/pnpm/bun, statically checks direct dependencies against the npm registry, then runs the upgrade install inside a sandbox. Your host `node_modules` is not modified.
+
+```zsh
+goaudit scan-project ~/mywebsite
+goaudit scan-project ~/mywebsite --upgrade-mode ncu
+goaudit scan-project ~/monorepo --upgrade-mode update --ci
+goaudit scan-project ~/app --manager pnpm
+goaudit scan-project ~/app --include-transitive   # also check package-lock.json packages
+```
+
+| `--upgrade-mode` | Behavior |
+|------------------|----------|
+| `refresh-lock` (default) | Remove lockfile and reinstall (full re-resolve) |
+| `ncu` | Run npm-check-updates, then install (`bun` uses `bun update`) |
+| `update` | `npm update` / `pnpm update` / `bun update` |
 
 ## Requirements
 
