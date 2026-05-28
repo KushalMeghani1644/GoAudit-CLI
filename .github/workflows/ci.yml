@@ -48,7 +48,7 @@ jobs:
         run: go test -race ./...
 
       - name: Build CLI
-        run: go build -trimpath -o /tmp/goaudit .
+        run: go build -trimpath -o /tmp/goaudit ./cmd/goaudit
 
   docker:
     name: Sandbox image build
