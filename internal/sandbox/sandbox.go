@@ -3,6 +3,7 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -73,7 +74,27 @@ func (s *Sandbox) EnsureImage(ctx context.Context) (string, error) {
 		return "", err
 	}
 	defer reader.Close()
-	_, _ = io.Copy(io.Discard, reader)
+	dec := json.NewDecoder(reader)
+	for {
+		var msg struct {
+			Error       string `json:"error"`
+			ErrorDetail struct {
+				Message string `json:"message"`
+			} `json:"errorDetail"`
+		}
+		if err := dec.Decode(&msg); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return "", err
+		}
+		if msg.Error != "" {
+			if msg.ErrorDetail.Message != "" {
+				return "", fmt.Errorf("%s: %s", msg.Error, msg.ErrorDetail.Message)
+			}
+			return "", fmt.Errorf("%s", msg.Error)
+		}
+	}
 	return s.InspectImageDigest(ctx, s.image)
 }
 
@@ -317,6 +338,9 @@ echo "GOAUDIT_WARM_READY" >&2
 	}
 	if s.runtime == "runsc" {
 		hostConfig.SecurityOpt = []string{"label=disable"}
+	}
+	if !s.networkEnabled {
+		hostConfig.NetworkMode = "none"
 	}
 
 	resp, err := s.cli.ContainerCreate(ctx, &container.Config{

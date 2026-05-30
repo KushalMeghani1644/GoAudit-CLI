@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
+	"golang.org/x/sys/unix"
 )
 
 // DefaultCacheSubdir is the default directory for sandbox cache metadata.
@@ -33,6 +34,8 @@ type CachedContainer struct {
 	Image       string    `json:"image"`
 	Runtime     string    `json:"runtime"`
 	Profile     string    `json:"profile"`
+	RunAsRoot   bool      `json:"run_as_root"`
+	Network     bool      `json:"network_enabled"`
 	ImageDigest string    `json:"image_digest"`
 	CreatedAt   time.Time `json:"created_at"`
 	LastUsed    time.Time `json:"last_used"`
@@ -49,6 +52,7 @@ type CacheManager struct {
 	mu       sync.Mutex
 	dir      string
 	filePath string
+	lockPath string
 	data     *CacheData
 	cli      *client.Client
 }
@@ -70,6 +74,7 @@ func NewCacheManager(dir string) (*CacheManager, error) {
 	cm := &CacheManager{
 		dir:      dir,
 		filePath: filepath.Join(dir, "cache.json"),
+		lockPath: filepath.Join(dir, "cache.lock"),
 		cli:      cli,
 	}
 
@@ -97,22 +102,32 @@ func ResolveCacheDir(dir string) (string, error) {
 	return filepath.Join(home, DefaultCacheSubdir), nil
 }
 
-// cacheKey builds the map key for a (runtime, profile) pair.
-func cacheKey(runtime, profile string) string {
+// cacheKey builds the map key for runtime/profile plus execution policy.
+func cacheKey(runtime, profile string, runAsRoot, networkEnabled bool) string {
 	rt := runtime
 	if rt == "" {
 		rt = "runc"
 	}
-	return rt + ":" + profile
+	return fmt.Sprintf("%s:%s:root=%t:net=%t", rt, profile, runAsRoot, networkEnabled)
 }
 
-// Lookup finds a valid cached container for the given runtime and profile.
+// Lookup finds a valid cached container for the given runtime, profile, and policy.
 // Returns nil if no valid entry exists.
-func (cm *CacheManager) Lookup(ctx context.Context, runtime, profile string) *CachedContainer {
+func (cm *CacheManager) Lookup(ctx context.Context, runtime, profile string, runAsRoot, networkEnabled bool) *CachedContainer {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	key := cacheKey(runtime, profile)
+	lf, err := cm.lock()
+	if err != nil {
+		return nil
+	}
+	defer cm.unlock(lf)
+
+	if err := cm.reloadLocked(); err != nil {
+		return nil
+	}
+
+	key := cacheKey(runtime, profile, runAsRoot, networkEnabled)
 	entry, ok := cm.data.Containers[key]
 	if !ok {
 		return nil
@@ -128,12 +143,22 @@ func (cm *CacheManager) Lookup(ctx context.Context, runtime, profile string) *Ca
 	return entry
 }
 
-// Store saves a cache entry for the given runtime and profile.
-func (cm *CacheManager) Store(ctx context.Context, runtime, profile, containerID, img, digest string) error {
+// Store saves a cache entry for the given runtime, profile, and policy.
+func (cm *CacheManager) Store(ctx context.Context, runtime, profile string, runAsRoot, networkEnabled bool, containerID, img, digest string) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	key := cacheKey(runtime, profile)
+	lf, err := cm.lock()
+	if err != nil {
+		return err
+	}
+	defer cm.unlock(lf)
+
+	if err := cm.reloadLocked(); err != nil {
+		return err
+	}
+
+	key := cacheKey(runtime, profile, runAsRoot, networkEnabled)
 
 	// If there's an existing entry with a different container, remove the old one.
 	if old, ok := cm.data.Containers[key]; ok && old.ContainerID != containerID {
@@ -146,6 +171,8 @@ func (cm *CacheManager) Store(ctx context.Context, runtime, profile, containerID
 		Image:       img,
 		Runtime:     runtime,
 		Profile:     profile,
+		RunAsRoot:   runAsRoot,
+		Network:     networkEnabled,
 		ImageDigest: digest,
 		CreatedAt:   now,
 		LastUsed:    now,
@@ -155,11 +182,19 @@ func (cm *CacheManager) Store(ctx context.Context, runtime, profile, containerID
 }
 
 // TouchLastUsed updates the last-used timestamp for a cache entry.
-func (cm *CacheManager) TouchLastUsed(runtime, profile string) {
+func (cm *CacheManager) TouchLastUsed(runtime, profile string, runAsRoot, networkEnabled bool) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	key := cacheKey(runtime, profile)
+	lf, err := cm.lock()
+	if err != nil {
+		return
+	}
+	defer cm.unlock(lf)
+
+	_ = cm.reloadLocked()
+
+	key := cacheKey(runtime, profile, runAsRoot, networkEnabled)
 	if entry, ok := cm.data.Containers[key]; ok {
 		entry.LastUsed = time.Now()
 		_ = cm.saveLocked()
@@ -167,11 +202,20 @@ func (cm *CacheManager) TouchLastUsed(runtime, profile string) {
 }
 
 // Invalidate removes a specific cache entry and its container.
-func (cm *CacheManager) Invalidate(ctx context.Context, runtime, profile string) {
+func (cm *CacheManager) Invalidate(ctx context.Context, runtime, profile string, runAsRoot, networkEnabled bool) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	key := cacheKey(runtime, profile)
+	lf, err := cm.lock()
+	if err != nil {
+		return
+	}
+	defer cm.unlock(lf)
+
+	if err := cm.reloadLocked(); err != nil {
+		return
+	}
+	key := cacheKey(runtime, profile, runAsRoot, networkEnabled)
 	cm.removeEntryLocked(ctx, key)
 }
 
@@ -180,10 +224,18 @@ func (cm *CacheManager) InvalidateAll(ctx context.Context) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
+	lf, err := cm.lock()
+	if err != nil {
+		return
+	}
+	defer cm.unlock(lf)
+
+	_ = cm.reloadLocked()
 	for key := range cm.data.Containers {
 		cm.removeEntryLocked(ctx, key)
 	}
 	_ = os.Remove(cm.filePath)
+	_ = os.Remove(cm.lockPath)
 	cm.data = &CacheData{Version: CacheVersion, Containers: map[string]*CachedContainer{}}
 }
 
@@ -192,6 +244,15 @@ func (cm *CacheManager) InvalidateByRuntime(ctx context.Context, runtime string)
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
+	lf, err := cm.lock()
+	if err != nil {
+		return
+	}
+	defer cm.unlock(lf)
+
+	if err := cm.reloadLocked(); err != nil {
+		return
+	}
 	for key, entry := range cm.data.Containers {
 		entryRT := entry.Runtime
 		if entryRT == "" {
@@ -212,6 +273,15 @@ func (cm *CacheManager) Entries() map[string]*CachedContainer {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
+	lf, err := cm.lock()
+	if err != nil {
+		return map[string]*CachedContainer{}
+	}
+	defer cm.unlock(lf)
+
+	if err := cm.reloadLocked(); err != nil {
+		return map[string]*CachedContainer{}
+	}
 	result := make(map[string]*CachedContainer, len(cm.data.Containers))
 	for k, v := range cm.data.Containers {
 		cp := *v
@@ -258,7 +328,7 @@ func (cm *CacheManager) ShouldRefreshLatest(ctx context.Context, entry *CachedCo
 		return false, false
 	}
 	if !strings.HasSuffix(entry.Image, ":latest") {
-		return true, false
+		return false, false
 	}
 
 	remoteDigest, err := cm.RemoteDigest(ctx, entry.Image)
@@ -298,25 +368,13 @@ func (cm *CacheManager) Close() {
 // --- internal helpers ---
 
 func (cm *CacheManager) load() error {
-	data, err := os.ReadFile(cm.filePath)
-	if err != nil {
-		return err
-	}
-	var cd CacheData
-	if err := json.Unmarshal(data, &cd); err != nil {
-		return err
-	}
-	if cd.Version != CacheVersion {
-		return fmt.Errorf("unsupported cache version %d", cd.Version)
-	}
-	if cd.Containers == nil {
-		cd.Containers = map[string]*CachedContainer{}
-	}
-	cm.data = &cd
-	return nil
+	return cm.reloadLocked()
 }
 
 func (cm *CacheManager) saveLocked() error {
+	if cm.filePath == "" || cm.dir == "" {
+		return nil
+	}
 	if err := os.MkdirAll(cm.dir, 0o755); err != nil {
 		return err
 	}
@@ -324,7 +382,11 @@ func (cm *CacheManager) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(cm.filePath, data, 0o644)
+	tmp := cm.filePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, cm.filePath)
 }
 
 func (cm *CacheManager) removeEntryLocked(ctx context.Context, key string) {
@@ -365,4 +427,62 @@ func (cm *CacheManager) PullAndDigest(ctx context.Context, img string) (string, 
 	}
 	digest := cm.LocalImageDigest(ctx, img)
 	return digest, nil
+}
+
+func (cm *CacheManager) reloadLocked() error {
+	if cm.filePath == "" {
+		if cm.data == nil {
+			cm.data = &CacheData{Version: CacheVersion, Containers: map[string]*CachedContainer{}}
+		}
+		return nil
+	}
+	if err := os.MkdirAll(cm.dir, 0o755); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(cm.filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			cm.data = &CacheData{Version: CacheVersion, Containers: map[string]*CachedContainer{}}
+			return nil
+		}
+		return err
+	}
+	var cd CacheData
+	if err := json.Unmarshal(data, &cd); err != nil {
+		return err
+	}
+	if cd.Version != CacheVersion {
+		return fmt.Errorf("unsupported cache version %d", cd.Version)
+	}
+	if cd.Containers == nil {
+		cd.Containers = map[string]*CachedContainer{}
+	}
+	cm.data = &cd
+	return nil
+}
+
+func (cm *CacheManager) lock() (*os.File, error) {
+	if cm.lockPath == "" || cm.dir == "" {
+		return nil, nil
+	}
+	if err := os.MkdirAll(cm.dir, 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(cm.lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+func (cm *CacheManager) unlock(f *os.File) {
+	if f == nil {
+		return
+	}
+	_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+	_ = f.Close()
 }
