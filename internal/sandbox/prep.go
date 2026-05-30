@@ -12,3 +12,10 @@ const aptPrepScript = `if ! command -v strace >/dev/null 2>&1 || ! command -v cu
   fi
 fi
 `
+
+func prepScriptForRuntime(runtime string) string {
+	if runtime == "runsc" {
+		return ""
+	}
+	return aptPrepScript
+}

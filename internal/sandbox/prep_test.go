@@ -16,3 +16,12 @@ func TestAptPrepScriptSkipsWhenToolsPresent(t *testing.T) {
 		t.Fatal("expected apt-get when tools missing")
 	}
 }
+
+func TestPrepScriptForRuntimeSkipsRunsc(t *testing.T) {
+	if got := prepScriptForRuntime("runsc"); got != "" {
+		t.Fatalf("expected runsc prep script to be empty, got %q", got)
+	}
+	if got := prepScriptForRuntime("runc"); got != aptPrepScript {
+		t.Fatal("expected runc prep script to use apt bootstrap")
+	}
+}

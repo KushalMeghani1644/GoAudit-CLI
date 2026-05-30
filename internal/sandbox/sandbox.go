@@ -203,7 +203,7 @@ echo "GOAUDIT_TARGET_EXIT:${target_rc}" >&2
 if [ "${target_rc}" -ne 0 ]; then
   exit 99
 fi
-`, aptPrepScript, setupScript, toolsCheck, profileName, image,
+	`, prepScriptForRuntime(s.runtime), setupScript, toolsCheck, profileName, image,
 		userSetup, honeypotScript(), projectStage, targetCmd, execLine)
 
 	pidsLimit := int64(256)
@@ -323,7 +323,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 mkdir -p /workspace
 echo "GOAUDIT_WARM_READY" >&2
-`, aptPrepScript, setupScript, toolsCheck, userSetup, honeypotScript())
+	`, prepScriptForRuntime(s.runtime), setupScript, toolsCheck, userSetup, honeypotScript())
 
 	pidsLimit := int64(256)
 	hostConfig := &container.HostConfig{
