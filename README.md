@@ -2,25 +2,11 @@
   <img src="assets/favicon.png" width="150" />
 </h1>
 
-GoAudit is a utility for checking whether a npm install or a curl | sh is malicious or not?
+GoAudit is a sandbox security scanner for CLI commands.
 
-## Demo
+It inspects install commands and project upgrades for suspicious file reads, writes, process execution, and network behavior.
 
-Using GoAudit is simple! just use the `scan` command and give the `npm install` or `curl | sh` command you want to check.
-
-```zsh
-$ goaudit scan "cat ~/.aws/credentials"
-[CRITICAL] File Read: /root/.aws/credentials
-Verdict: MALICIOUS
-
-$ goaudit scan "npm install lodash"
-[WARNING] Suspicious Command Pattern: npm install lodash
-Verdict: SUSPICIOUS
-```
-
-## Install 
-
-Currently to install GoAudit, you need to have Go installed on your system, with that just run the following command!
+## Install
 
 ```zsh
 go install github.com/KushalMeghani1644/GoAudit-CLI/cmd/goaudit@latest
@@ -28,45 +14,60 @@ go install github.com/KushalMeghani1644/GoAudit-CLI/cmd/goaudit@latest
 
 ## Usage
 
-GoAudit provides a simple UX for scanning npm, pnpm, bun, pip, and curl | sh commands. Currently we support these managers for checks, and project-based scans for JS apps.
-
-### Scan a single command
+### Scan a command
 
 ```zsh
-goaudit scan "npm install <package>"
+goaudit scan "npm install lodash"
 goaudit scan "pnpm add <package>"
 goaudit scan "bun add <package>"
 goaudit scan "pip install <package>"
 goaudit scan "curl -fsSL https://example.com/install.sh | sh"
-goaudit scan "npm install <package>" --ci   # JSON output
-goaudit scan "curl -fsSL https://example.com/install.sh | sh" --offline
-goaudit scan "curl -fsSL https://example.com/install.sh | sh" --allow-domain example.com --max-remote-depth 1
-goaudit scan "pnpm add <package>" --node-image node:current-slim
-goaudit scan "bun add <package>" --bun-image oven/bun:1
+goaudit scan "npm install <package>" --ci
+goaudit scan "npm install <package>" --verbose
+goaudit scan "npm install <package>" --offline
+goaudit scan "npm install <package>" --allow-domain example.com --max-remote-depth 1
+goaudit scan "npm install <package>" --network off
 goaudit scan "npm install <package>" --run-as-root
 goaudit scan "npm install <package>" --skip-probe
-goaudit scan "npm install <package>" --network off
+goaudit scan "npm install <package>" --warm-cache
+goaudit scan "npm install <package>" --no-cache
 ```
 
-### Scan a project directory
+### Scan a project
 
-Audit an existing app (Next.js, TanStack, etc.) before upgrading dependencies. GoAudit reads `package.json`, detects npm/pnpm/bun, statically checks direct dependencies against the npm registry, then runs the upgrade install inside a sandbox. Your host `node_modules` is not modified.
+`scan-project` audits an existing JavaScript project before you upgrade dependencies. It reads `package.json`, detects npm/pnpm/bun, checks dependencies against the npm registry, and then runs the upgrade install inside a sandbox. Your host `node_modules` is not modified.
 
 ```zsh
 goaudit scan-project ~/mywebsite
 goaudit scan-project ~/mywebsite --upgrade-mode ncu
 goaudit scan-project ~/monorepo --upgrade-mode update --ci
 goaudit scan-project ~/app --manager pnpm
-goaudit scan-project ~/app --include-transitive   # also check package-lock.json packages
-goaudit scan-project ~/app --probe-all            # probe all dependencies, not just suspicious ones
+goaudit scan-project ~/app --include-transitive
+goaudit scan-project ~/app --probe-all
 goaudit scan-project ~/app --skip-probe
+goaudit scan-project ~/app --warm-cache
 ```
 
-| `--upgrade-mode` | Behavior |
-|------------------|----------|
-| `refresh-lock` (default) | Remove lockfile and reinstall (full re-resolve) |
+Upgrade modes:
+
+| Mode | Behavior |
+|------|----------|
+| `refresh-lock` | Remove lockfile and reinstall |
 | `ncu` | Run npm-check-updates, then install (`bun` uses `bun update`) |
-| `update` | `npm update` / `pnpm update` / `bun update` |
+| `update` | Run the package manager's update command |
+
+## Cache
+
+GoAudit caches prepared sandbox containers to speed up repeat scans.
+
+```zsh
+goaudit cache status
+goaudit cache clean
+goaudit cache clean --runtime runsc
+goaudit cache clean --runtime runc
+```
+
+Use `--cache-dir` or `GOAUDIT_CACHE_DIR` to store cache entries elsewhere.
 
 ## Requirements
 
@@ -75,7 +76,7 @@ goaudit scan-project ~/app --skip-probe
 
 ### gVisor (runsc) on Fedora / SELinux
 
-GoAudit uses gVisor when Docker lists `runsc` in `docker info` Runtimes. Installing `runsc` binary is not enough, please register it in Docker:
+GoAudit uses gVisor when Docker lists `runsc` in `docker info` runtimes. Installing the `runsc` binary is not enough; it must be registered with Docker:
 
 ```json
 {
@@ -99,11 +100,17 @@ docker info | rg -i runtimes
 
 **SELinux:** gVisor cannot use Docker’s default container SELinux labels. GoAudit sets `--security-opt label=disable` automatically for `runsc` containers.
 
-**apt-get under runsc:** Many hosts cannot run `apt-get` inside a gVisor container. When gVisor is available and you keep the default `--node-image`, GoAudit pulls `ghcr.io/kushalmeghani1644/goaudit-node-sandbox:latest`, which has scan tools installed at image build time with Docker's default runtime. It still runs `npm install` / `pnpm install` under gVisor for dynamic scanning.
+**Node sandbox image:** when gVisor is available and you keep the default `--node-image`, GoAudit uses `ghcr.io/kushalmeghani1644/goaudit-node-sandbox:latest` for Node-based scans.
 
-If the published gVisor image cannot be prepared, or if gVisor prep still fails, GoAudit **retries once with runc** and prints a warning (npm behavior is still scanned).
+**Fallbacks:** if gVisor is unavailable, or image preparation fails, GoAudit falls back to `runc` and prints a warning.
 
-Without `runsc` in `docker info`, GoAudit falls back to `runc` with a warning.
+## Notes
+
+- `scan` supports npm, pnpm, bun, pip, and `curl | sh` style commands.
+- `scan-project` supports npm, pnpm, and bun only.
+- `--ci` emits JSON output.
+- `--verbose` shows live findings during a scan.
+- `--warm-cache` prepares the sandbox without running a scan.
 
 ## Important Note
 
