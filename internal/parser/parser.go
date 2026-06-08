@@ -27,9 +27,9 @@ var (
 	netRegex  = regexp.MustCompile(`connect\(.*sa_family=(?:AF_INET|AF_INET6).*?sin_port=htons\((\d+)\).*?(?:inet_addr\("(.*?)"\)|inet_pton\([^,]+,\s*"(.*?)")`)
 	execRegex = regexp.MustCompile(`(?i)execve\(\"(.*?)\",\s*\[(.*?)\]`)
 	mutRegex  = regexp.MustCompile(`(?i)(?:chmod|fchmod|fchmodat|rename|unlink|unlinkat)\(\"?(.*?)\"?[,)]`)
-	privRegex = regexp.MustCompile(`(?i)(?:setuid|setgid|setreuid|setregid)\((\d+)`)
+	privRegex = regexp.MustCompile(`(?i)(setuid|setgid|setreuid|setregid)\(([^)]*)\)`)
 
-	readCriticalPaths  = regexp.MustCompile(`(?i)(.*?/\.env|.*?/\.ssh/.*?|.*?/\.aws/.*?|.*?/\.kube/.*?|.*?id_rsa)`)
+	readCriticalPaths  = regexp.MustCompile(`(?i)((?:^|.*?/)\.env(?:\b|$)|.*?/\.ssh/.*?|.*?/\.aws/.*?|.*?/\.kube/.*?|.*?/\.git-credentials|.*?/\.npmrc|.*?id_rsa)`)
 	writeCriticalPaths = regexp.MustCompile(`(?i)(.*?/\.bashrc|.*?/\.zshrc|.*?/\.profile|.*?/\.ssh/authorized_keys|^/etc/crontab|^/etc/cron\..*|^/usr/local/bin/.*|^/usr/bin/.*)`)
 	writeAllowedPaths  = regexp.MustCompile(`(?i)(^/tmp/|^/dev/|^/proc/|^/sys/|^/workspace/|node_modules/|\.npm/|\.cache/|site-packages/|/var/tmp/|/pnpm/store/|pnpm-state\.json|^/usr/local/lib/|^/usr/lib/|(^|/)package(-lock)?\.json$|(^|/)pnpm-lock\.yaml$|(^|/)bun\.lockb?$|\.hm$|^/root/\.config/|^/home/.*?/\.config/|^/root/\.local/|^/home/.*?/\.local/|^/root/\.bun/|^/home/.*?/\.bun/)`)
 
@@ -39,6 +39,7 @@ var (
 	memfdRegex        = regexp.MustCompile(`(?i)memfd_create\("(.*?)"`)
 	ptraceAttachRegex = regexp.MustCompile(`(?i)ptrace\(PTRACE_(?:ATTACH|SEIZE)`)
 	bindListenRegex   = regexp.MustCompile(`(?:bind|listen)\(\d+,\s*\{sa_family=AF_INET6?,\s*sin6?_port=htons\((\d+)\)`)
+	sendRegex         = regexp.MustCompile(`(?i)(?:sendto|sendmsg|write)\(\d+`)
 
 	// Environment variable theft — reading /proc/self/environ
 	procEnvironRegex = regexp.MustCompile(`(?i)open(?:at)?\(.*?"/proc/self/environ"`)
@@ -49,18 +50,59 @@ type ParseOptions struct {
 	// KnownRegistryIPs maps IP addresses to their registry hostname.
 	// Connections to these IPs are classified as EXTERNAL_NETWORK_REGISTRY.
 	KnownRegistryIPs map[string]string
+
+	// ProbeExpected is true when the scan appended a runtime probe script.
+	ProbeExpected bool
 }
 
 func ParseStream(r io.Reader, reporter *report.Reporter, opts ParseOptions) ([]report.Finding, error) {
+	findings, _, err := ParseStreamWithHealth(r, reporter, opts)
+	return findings, err
+}
+
+type TraceHealth struct {
+	TargetPhaseObserved   bool
+	TargetExitObserved    bool
+	TargetSyscallObserved bool
+	ProbeExpected         bool
+	ProbePhaseObserved    bool
+	ProbeSyscallObserved  bool
+}
+
+func (h TraceHealth) Usable() bool {
+	if !h.TargetPhaseObserved || !h.TargetSyscallObserved {
+		return false
+	}
+	if h.ProbeExpected && !h.ProbePhaseObserved {
+		return false
+	}
+	return true
+}
+
+func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOptions) ([]report.Finding, TraceHealth, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	var findings []report.Finding
 	probePhase := false
 	targetPhase := false
+	health := TraceHealth{ProbeExpected: opts.ProbeExpected}
 	seen := map[string]bool{} // deduplication key
+	sawSuspiciousOutbound := false
+	lastSuspiciousHost := ""
 
 	if opts.KnownRegistryIPs == nil {
 		opts.KnownRegistryIPs = map[string]string{}
+	}
+
+	emit := func(f report.Finding) {
+		if tag := phaseTag(probePhase, targetPhase); tag != "" && f.ReasonCode != "RUNTIME_METADATA" {
+			f.Evidence = appendPhaseEvidence(f.Evidence, tag)
+			if tag == "[runtime probe]" && f.Confidence < 95 && f.Severity != report.SeverityInfo {
+				f.Confidence += 5
+			}
+		}
+		findings = append(findings, f)
+		reporter.PrintLiveFinding(f)
 	}
 
 	for scanner.Scan() {
@@ -68,34 +110,33 @@ func ParseStream(r io.Reader, reporter *report.Reporter, opts ParseOptions) ([]r
 
 		if strings.Contains(line, "GOAUDIT_RUNTIME_ERROR:missing_tool:") {
 			tool := strings.TrimSpace(strings.TrimPrefix(line[strings.Index(line, "GOAUDIT_RUNTIME_ERROR:missing_tool:"):], "GOAUDIT_RUNTIME_ERROR:missing_tool:"))
-			f := report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: "RUNTIME_MISSING_TOOL", Path: tool, Confidence: 90}
-			findings = append(findings, f)
-			reporter.PrintLiveFinding(f)
+			emit(report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: "RUNTIME_MISSING_TOOL", Path: tool, Confidence: 90})
 			continue
 		}
 		if strings.Contains(line, "GOAUDIT_RUNTIME_ERROR:prep_failed") {
-			f := report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: "RUNTIME_PREP_FAILURE", Path: "sandbox prep failed", Confidence: 90}
-			findings = append(findings, f)
-			reporter.PrintLiveFinding(f)
+			emit(report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: "RUNTIME_PREP_FAILURE", Path: "sandbox prep failed", Confidence: 90})
 			continue
 		}
 		if strings.Contains(line, "GOAUDIT_RUNTIME_ERROR:project_copy_failed") {
-			f := report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: "RUNTIME_PROJECT_COPY_FAILURE", Path: "project mount", Confidence: 90}
-			findings = append(findings, f)
-			reporter.PrintLiveFinding(f)
+			emit(report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: "RUNTIME_PROJECT_COPY_FAILURE", Path: "project mount", Confidence: 90})
 			continue
 		}
 		if strings.Contains(line, "GOAUDIT_RUNTIME_META:") {
 			meta := strings.TrimSpace(line[strings.Index(line, "GOAUDIT_RUNTIME_META:")+len("GOAUDIT_RUNTIME_META:"):])
 			if strings.Contains(meta, "phase=probe") {
 				probePhase = true
+				targetPhase = true
+				health.ProbePhaseObserved = true
+				sawSuspiciousOutbound = false
+				lastSuspiciousHost = ""
 			}
 			if strings.Contains(meta, "phase=target") {
 				targetPhase = true
+				health.TargetPhaseObserved = true
+				sawSuspiciousOutbound = false
+				lastSuspiciousHost = ""
 			}
-			f := report.Finding{Severity: report.SeverityInfo, Type: "runtime", ReasonCode: "RUNTIME_METADATA", Path: "sandbox", Confidence: 90, Evidence: meta}
-			findings = append(findings, f)
-			reporter.PrintLiveFinding(f)
+			emit(report.Finding{Severity: report.SeverityInfo, Type: "runtime", ReasonCode: "RUNTIME_METADATA", Path: "sandbox", Confidence: 90, Evidence: meta})
 			continue
 		}
 		if strings.Contains(line, "GOAUDIT_TARGET_EXIT:") {
@@ -104,6 +145,7 @@ func ParseStream(r io.Reader, reporter *report.Reporter, opts ParseOptions) ([]r
 			if err != nil {
 				continue
 			}
+			health.TargetExitObserved = true
 			if code != 0 {
 				rc := "TARGET_COMMAND_FAILED"
 				if code == 127 {
@@ -111,21 +153,25 @@ func ParseStream(r io.Reader, reporter *report.Reporter, opts ParseOptions) ([]r
 				} else if code == 124 {
 					rc = "TARGET_COMMAND_TIMEOUT"
 				}
-				f := report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: rc, Path: strconv.Itoa(code), Confidence: 95, Evidence: "Target command returned non-zero exit status in sandbox"}
-				findings = append(findings, f)
-				reporter.PrintLiveFinding(f)
+				emit(report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: rc, Path: strconv.Itoa(code), Confidence: 95, Evidence: "Target command returned non-zero exit status in sandbox"})
 			}
 			continue
 		}
 
+		if targetPhase && isTraceSyscallLine(line) {
+			if probePhase {
+				health.ProbeSyscallObserved = true
+			} else {
+				health.TargetSyscallObserved = true
+			}
+		}
+
 		// --- /proc/self/environ theft ---
 		if procEnvironRegex.MatchString(line) {
-			key := "ENV_THEFT"
+			key := "ENV_THEFT:" + phaseTag(probePhase, targetPhase)
 			if !seen[key] {
 				seen[key] = true
-				f := report.Finding{Severity: report.SeverityCritical, Type: "fs_read", ReasonCode: "ENV_THEFT", Path: "/proc/self/environ", Confidence: 95, Evidence: "Read /proc/self/environ to steal CI secrets and environment variables"}
-				findings = append(findings, f)
-				reporter.PrintLiveFinding(f)
+				emit(report.Finding{Severity: report.SeverityCritical, Type: "fs_read", ReasonCode: "ENV_THEFT", Path: "/proc/self/environ", Confidence: 95, Evidence: "Read /proc/self/environ to steal CI secrets and environment variables"})
 			}
 			continue
 		}
@@ -138,30 +184,24 @@ func ParseStream(r io.Reader, reporter *report.Reporter, opts ParseOptions) ([]r
 
 			if !isWrite {
 				if readCriticalPaths.MatchString(path) {
-					key := "CREDENTIAL_READ:" + path
+					key := "CREDENTIAL_READ:" + path + ":" + phaseTag(probePhase, targetPhase)
 					if !seen[key] {
 						seen[key] = true
-						f := report.Finding{Severity: report.SeverityCritical, Type: "fs_read", ReasonCode: "CREDENTIAL_READ", Path: path, Confidence: 95}
-						findings = append(findings, f)
-						reporter.PrintLiveFinding(f)
+						emit(report.Finding{Severity: report.SeverityCritical, Type: "fs_read", ReasonCode: "CREDENTIAL_READ", Path: path, Confidence: 95})
 					}
 				}
 			} else {
 				if writeCriticalPaths.MatchString(path) {
-					key := "PERSISTENCE_WRITE:" + path
+					key := "PERSISTENCE_WRITE:" + path + ":" + phaseTag(probePhase, targetPhase)
 					if !seen[key] {
 						seen[key] = true
-						f := report.Finding{Severity: report.SeverityCritical, Type: "fs_write", ReasonCode: "PERSISTENCE_WRITE", Path: path, Confidence: 95}
-						findings = append(findings, f)
-						reporter.PrintLiveFinding(f)
+						emit(report.Finding{Severity: report.SeverityCritical, Type: "fs_write", ReasonCode: "PERSISTENCE_WRITE", Path: path, Confidence: 95})
 					}
 				} else if !writeAllowedPaths.MatchString(path) {
-					key := "UNEXPECTED_WRITE:" + path
+					key := "UNEXPECTED_WRITE:" + path + ":" + phaseTag(probePhase, targetPhase)
 					if !seen[key] {
 						seen[key] = true
-						f := report.Finding{Severity: report.SeverityWarning, Type: "fs_write", ReasonCode: "UNEXPECTED_WRITE", Path: path, Confidence: 70}
-						findings = append(findings, f)
-						reporter.PrintLiveFinding(f)
+						emit(report.Finding{Severity: report.SeverityWarning, Type: "fs_write", ReasonCode: "UNEXPECTED_WRITE", Path: path, Confidence: 70})
 					}
 				}
 			}
@@ -172,29 +212,30 @@ func ParseStream(r io.Reader, reporter *report.Reporter, opts ParseOptions) ([]r
 		if execMatches := execRegex.FindStringSubmatch(line); len(execMatches) > 2 {
 			bin := execMatches[1]
 			args := execMatches[2]
-			if strings.HasSuffix(bin, "/crontab") || bin == "crontab" {
-				key := "PERSISTENCE_WRITE:crontab"
+			argsLower := strings.ToLower(args)
+			if strings.HasSuffix(bin, "/crontab") || bin == "crontab" || (isShellBinary(bin) && strings.Contains(argsLower, "crontab")) {
+				key := "PERSISTENCE_WRITE:crontab:" + phaseTag(probePhase, targetPhase)
 				if !seen[key] {
 					seen[key] = true
-					f := report.Finding{Severity: report.SeverityCritical, Type: "fs_write", ReasonCode: "PERSISTENCE_WRITE", Path: bin + " " + args, Confidence: 90, Evidence: "Crontab command executed from sandboxed install"}
-					findings = append(findings, f)
-					reporter.PrintLiveFinding(f)
+					evidence := "Crontab command executed from sandboxed install"
+					if isShellBinary(bin) {
+						evidence = "Shell invoked crontab persistence command"
+					}
+					emit(report.Finding{Severity: report.SeverityCritical, Type: "fs_write", ReasonCode: "PERSISTENCE_WRITE", Path: bin + " " + args, Confidence: 90, Evidence: evidence})
 				}
 				continue
 			}
 			isCritical := false
 			if execSuspiciousBinaries.MatchString(bin) {
 				isCritical = true
-			} else if (strings.HasSuffix(bin, "/bash") || strings.HasSuffix(bin, "/sh")) && (strings.Contains(args, "-i") || strings.Contains(args, "/dev/tcp")) {
+			} else if isShellBinary(bin) && (strings.Contains(args, "-i") || strings.Contains(args, "/dev/tcp")) {
 				isCritical = true
 			}
 			if isCritical {
-				key := "SUSPICIOUS_EXEC:" + bin
+				key := "SUSPICIOUS_EXEC:" + bin + ":" + phaseTag(probePhase, targetPhase)
 				if !seen[key] {
 					seen[key] = true
-					f := report.Finding{Severity: report.SeverityCritical, Type: "exec", ReasonCode: "SUSPICIOUS_EXEC", Path: bin + " " + args, Confidence: 90}
-					findings = append(findings, f)
-					reporter.PrintLiveFinding(f)
+					emit(report.Finding{Severity: report.SeverityCritical, Type: "exec", ReasonCode: "SUSPICIOUS_EXEC", Path: bin + " " + args, Confidence: 90})
 				}
 			}
 			continue
@@ -204,26 +245,34 @@ func ParseStream(r io.Reader, reporter *report.Reporter, opts ParseOptions) ([]r
 		if mutMatches := mutRegex.FindStringSubmatch(line); len(mutMatches) > 1 {
 			path := mutMatches[1]
 			if path != "" && writeCriticalPaths.MatchString(path) {
-				key := "PERSISTENCE_WRITE:" + path
+				key := "PERSISTENCE_WRITE:" + path + ":" + phaseTag(probePhase, targetPhase)
 				if !seen[key] {
 					seen[key] = true
-					f := report.Finding{Severity: report.SeverityCritical, Type: "fs_write", ReasonCode: "PERSISTENCE_WRITE", Path: path, Confidence: 90}
-					findings = append(findings, f)
-					reporter.PrintLiveFinding(f)
+					emit(report.Finding{Severity: report.SeverityCritical, Type: "fs_write", ReasonCode: "PERSISTENCE_WRITE", Path: path, Confidence: 90})
 				}
 			}
 			continue
 		}
 
 		// --- Privilege escalation ---
-		if privMatches := privRegex.FindStringSubmatch(line); len(privMatches) > 1 {
-			if privMatches[1] == "0" && targetPhase && strings.Contains(line, "= 0") {
-				key := "PRIVILEGE_ESCALATION"
+		if privMatches := privRegex.FindStringSubmatch(line); len(privMatches) > 2 {
+			syscall := strings.ToLower(strings.TrimSpace(privMatches[1]))
+			args := strings.Split(privMatches[2], ",")
+			for i := range args {
+				args[i] = strings.TrimSpace(args[i])
+			}
+			isRootEscalation := false
+			switch syscall {
+			case "setuid", "setgid":
+				isRootEscalation = len(args) >= 1 && args[0] == "0"
+			case "setreuid", "setregid":
+				isRootEscalation = len(args) >= 2 && args[0] == "0" && args[1] == "0"
+			}
+			if isRootEscalation && targetPhase && strings.Contains(line, "= 0") {
+				key := "PRIVILEGE_ESCALATION:" + phaseTag(probePhase, targetPhase)
 				if !seen[key] {
 					seen[key] = true
-					f := report.Finding{Severity: report.SeverityCritical, Type: "privilege", ReasonCode: "PRIVILEGE_ESCALATION", Path: line, Confidence: 92}
-					findings = append(findings, f)
-					reporter.PrintLiveFinding(f)
+					emit(report.Finding{Severity: report.SeverityCritical, Type: "privilege", ReasonCode: "PRIVILEGE_ESCALATION", Path: line, Confidence: 92})
 				}
 			}
 			continue
@@ -235,9 +284,7 @@ func ParseStream(r io.Reader, reporter *report.Reporter, opts ParseOptions) ([]r
 			linkPath := symlinkMatches[2]
 			if readCriticalPaths.MatchString(target) || writeCriticalPaths.MatchString(target) ||
 				readCriticalPaths.MatchString(linkPath) || writeCriticalPaths.MatchString(linkPath) {
-				f := report.Finding{Severity: report.SeverityCritical, Type: "fs_write", ReasonCode: "SYMLINK_SENSITIVE_PATH", Path: linkPath + " -> " + target, Confidence: 90, Evidence: "Symlink created targeting a sensitive file path"}
-				findings = append(findings, f)
-				reporter.PrintLiveFinding(f)
+				emit(report.Finding{Severity: report.SeverityCritical, Type: "fs_write", ReasonCode: "SYMLINK_SENSITIVE_PATH", Path: linkPath + " -> " + target, Confidence: 90, Evidence: "Symlink created targeting a sensitive file path"})
 			}
 			continue
 		}
@@ -248,17 +295,13 @@ func ParseStream(r io.Reader, reporter *report.Reporter, opts ParseOptions) ([]r
 			if m := memfdRegex.FindStringSubmatch(line); len(m) > 1 {
 				name = m[1]
 			}
-			f := report.Finding{Severity: report.SeverityCritical, Type: "exec", ReasonCode: "FILELESS_EXEC", Path: name, Confidence: 92, Evidence: "memfd_create detected — possible fileless code execution"}
-			findings = append(findings, f)
-			reporter.PrintLiveFinding(f)
+			emit(report.Finding{Severity: report.SeverityCritical, Type: "exec", ReasonCode: "FILELESS_EXEC", Path: name, Confidence: 92, Evidence: "memfd_create detected — possible fileless code execution"})
 			continue
 		}
 
 		// --- ptrace ---
 		if ptraceAttachRegex.MatchString(line) {
-			f := report.Finding{Severity: report.SeverityCritical, Type: "exec", ReasonCode: "PROCESS_INJECTION", Path: line, Confidence: 95, Evidence: "ptrace ATTACH/SEIZE detected — possible process injection"}
-			findings = append(findings, f)
-			reporter.PrintLiveFinding(f)
+			emit(report.Finding{Severity: report.SeverityCritical, Type: "exec", ReasonCode: "PROCESS_INJECTION", Path: line, Confidence: 95, Evidence: "ptrace ATTACH/SEIZE detected — possible process injection"})
 			continue
 		}
 
@@ -266,9 +309,21 @@ func ParseStream(r io.Reader, reporter *report.Reporter, opts ParseOptions) ([]r
 		if blMatches := bindListenRegex.FindStringSubmatch(line); len(blMatches) > 1 {
 			port, _ := strconv.Atoi(blMatches[1])
 			if port > 0 {
-				f := report.Finding{Severity: report.SeverityWarning, Type: "network", ReasonCode: "BACKDOOR_LISTENER", Port: port, Confidence: 80, Evidence: "Process binding/listening on a network port inside sandbox"}
-				findings = append(findings, f)
-				reporter.PrintLiveFinding(f)
+				emit(report.Finding{Severity: report.SeverityWarning, Type: "network", ReasonCode: "BACKDOOR_LISTENER", Port: port, Confidence: 80, Evidence: "Process binding/listening on a network port inside sandbox"})
+			}
+			continue
+		}
+
+		// --- Network send after suspicious outbound connect ---
+		if sawSuspiciousOutbound && sendRegex.MatchString(line) && targetPhase {
+			key := "DATA_EXFIL_SEND:" + phaseTag(probePhase, targetPhase)
+			if !seen[key] {
+				seen[key] = true
+				host := lastSuspiciousHost
+				if host == "" {
+					host = "outbound"
+				}
+				emit(report.Finding{Severity: report.SeverityCritical, Type: "network", ReasonCode: "DATA_EXFIL", Path: host, Host: host, Confidence: 88, Evidence: "Observed network data send after connection to a non-registry host"})
 			}
 			continue
 		}
@@ -294,13 +349,8 @@ func ParseStream(r io.Reader, reporter *report.Reporter, opts ParseOptions) ([]r
 			if port == 53 {
 				continue
 			}
-			// Skip private/link-local IPs — these are infrastructure, not exfiltration.
-			if ip != nil && (ip.IsPrivate() || ip.IsLinkLocalUnicast()) {
-				continue
-			}
-
-			// Deduplicate by IP:Port
-			dedupKey := fmt.Sprintf("NET:%s:%d", ipStr, port)
+			// Deduplicate by IP:Port and phase
+			dedupKey := fmt.Sprintf("NET:%s:%d:%s", ipStr, port, phaseTag(probePhase, targetPhase))
 			if seen[dedupKey] {
 				continue
 			}
@@ -315,36 +365,143 @@ func ParseStream(r io.Reader, reporter *report.Reporter, opts ParseOptions) ([]r
 				host = registryHost
 				reasonCode = "EXTERNAL_NETWORK_REGISTRY"
 				severity = report.SeverityInfo
-			} else if names, err := net.LookupAddr(ipStr); err == nil && len(names) > 0 {
-				host = strings.TrimSuffix(names[0], ".")
-			}
-
-			f := report.Finding{Severity: severity, Type: "network", ReasonCode: reasonCode, Host: host, Port: port, IP: ipStr, Confidence: 60}
-			findings = append(findings, f)
-			reporter.PrintLiveFinding(f)
-		}
-	}
-
-	// Annotate probe-phase findings
-	if probePhase {
-		probeStart := -1
-		for i, f := range findings {
-			if f.ReasonCode == "RUNTIME_METADATA" && strings.Contains(f.Evidence, "phase=probe") {
-				probeStart = i
-				break
-			}
-		}
-		if probeStart >= 0 {
-			for i := probeStart + 1; i < len(findings); i++ {
-				if findings[i].Severity != report.SeverityInfo {
-					findings[i].Evidence += " [runtime probe]"
-					if findings[i].Confidence < 95 {
-						findings[i].Confidence += 5
-					}
+				sawSuspiciousOutbound = false
+			} else if ipStr == "169.254.169.254" {
+				host = "cloud metadata service"
+				reasonCode = "CLOUD_METADATA_ACCESS"
+				severity = report.SeverityCritical
+				sawSuspiciousOutbound = true
+			} else if ip != nil && (ip.IsPrivate() || ip.IsLinkLocalUnicast()) {
+				reasonCode = "INTERNAL_NETWORK"
+				severity = report.SeverityWarning
+				sawSuspiciousOutbound = true
+			} else {
+				sawSuspiciousOutbound = true
+				if names, err := net.LookupAddr(ipStr); err == nil && len(names) > 0 {
+					host = strings.TrimSuffix(names[0], ".")
 				}
 			}
+			if sawSuspiciousOutbound && reasonCode != "EXTERNAL_NETWORK_REGISTRY" {
+				lastSuspiciousHost = host
+			}
+
+			emit(report.Finding{Severity: severity, Type: "network", ReasonCode: reasonCode, Host: host, Port: port, IP: ipStr, Confidence: 60})
 		}
 	}
 
-	return findings, scanner.Err()
+	findings = finalizeDynamicFindings(findings)
+	return findings, health, scanner.Err()
+}
+
+func phaseTag(probePhase, targetPhase bool) string {
+	if !targetPhase {
+		return ""
+	}
+	if probePhase {
+		return "[runtime probe]"
+	}
+	return "[install]"
+}
+
+func appendPhaseEvidence(evidence, tag string) string {
+	evidence = strings.TrimSpace(evidence)
+	if evidence == "" {
+		return tag
+	}
+	if strings.Contains(evidence, tag) {
+		return evidence
+	}
+	return evidence + " " + tag
+}
+
+func phaseFromEvidence(evidence string) string {
+	if strings.Contains(evidence, "[runtime probe]") {
+		return "[runtime probe]"
+	}
+	if strings.Contains(evidence, "[install]") {
+		return "[install]"
+	}
+	return ""
+}
+
+func isShellBinary(bin string) bool {
+	return strings.HasSuffix(bin, "/bash") ||
+		strings.HasSuffix(bin, "/sh") ||
+		strings.HasSuffix(bin, "/dash") ||
+		bin == "bash" ||
+		bin == "sh" ||
+		bin == "dash"
+}
+
+func finalizeDynamicFindings(findings []report.Finding) []report.Finding {
+	hasCredentialTheft := false
+	for _, f := range findings {
+		switch f.ReasonCode {
+		case "CREDENTIAL_READ", "ENV_THEFT":
+			hasCredentialTheft = true
+		}
+	}
+
+	out := make([]report.Finding, 0, len(findings))
+	seenExfil := map[string]bool{}
+	for _, f := range findings {
+		if f.ReasonCode == "DATA_EXFIL" {
+			phase := phaseFromEvidence(f.Evidence)
+			seenExfil[f.IP+":"+strconv.Itoa(f.Port)+":"+phase] = true
+			seenExfil["phase:"+phase] = true
+		}
+	}
+	for _, f := range findings {
+		if hasCredentialTheft && (f.ReasonCode == "EXTERNAL_NETWORK" || f.ReasonCode == "INTERNAL_NETWORK") {
+			phase := phaseFromEvidence(f.Evidence)
+			key := f.IP + ":" + strconv.Itoa(f.Port) + ":" + phase
+			if seenExfil[key] || seenExfil["phase:"+phase] {
+				continue
+			}
+			seenExfil[key] = true
+			seenExfil["phase:"+phase] = true
+			out = append(out, report.Finding{
+				Severity:   report.SeverityCritical,
+				Type:       f.Type,
+				ReasonCode: "DATA_EXFIL",
+				Path:       f.Host,
+				Host:       f.Host,
+				Port:       f.Port,
+				IP:         f.IP,
+				Confidence: 90,
+				Evidence:   appendPhaseEvidence("Outbound connection to non-registry host after credential access was observed", f.Evidence),
+			})
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+func isTraceSyscallLine(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false
+	}
+	if strings.Contains(line, "GOAUDIT_") {
+		return false
+	}
+	if idx := strings.Index(line, "("); idx > 0 {
+		name := line[:idx]
+		fields := strings.Fields(name)
+		if len(fields) > 0 {
+			name = fields[len(fields)-1]
+		}
+		if name == "" {
+			return false
+		}
+		for _, r := range name {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+				continue
+			}
+			return false
+		}
+		return true
+	}
+	return false
 }

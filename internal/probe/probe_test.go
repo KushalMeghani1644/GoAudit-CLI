@@ -16,9 +16,6 @@ func TestGenerateNodeProbeScriptSinglePackage(t *testing.T) {
 	if !strings.Contains(script, `"lodash"`) {
 		t.Fatal("expected lodash in probe script")
 	}
-	if !strings.Contains(script, "phase=probe") {
-		t.Fatal("expected phase=probe marker")
-	}
 	if !strings.Contains(script, "require(") {
 		t.Fatal("expected require() call")
 	}

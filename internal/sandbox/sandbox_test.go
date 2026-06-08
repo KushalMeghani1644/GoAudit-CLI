@@ -26,6 +26,19 @@ func TestHoneypotScript(t *testing.T) {
 	if !strings.Contains(script, "${SANDBOX_HOME}/.env") {
 		t.Error("honeypot missing .env file")
 	}
+	if !strings.Contains(script, "${SANDBOX_HOME}/.git-credentials") {
+		t.Error("honeypot missing .git-credentials")
+	}
+	if !strings.Contains(script, "${SANDBOX_HOME}/.npmrc") {
+		t.Error("honeypot missing .npmrc")
+	}
+}
+
+func TestWorkspaceHoneypotScript(t *testing.T) {
+	script := workspaceDotEnvScript()
+	if !strings.Contains(script, "/workspace/.env") {
+		t.Error("workspace honeypot missing /workspace/.env")
+	}
 }
 
 func TestStraceTraceSetContainsExpectedSyscalls(t *testing.T) {
@@ -33,7 +46,7 @@ func TestStraceTraceSetContainsExpectedSyscalls(t *testing.T) {
 		"open", "openat", "connect", "execve",
 		"chmod", "setuid", "setgid",
 		"symlink", "symlinkat", "memfd_create", "ptrace",
-		"socket", "bind", "listen",
+		"socket", "bind", "listen", "sendto", "sendmsg", "write",
 	}
 	for _, syscall := range expected {
 		if !strings.Contains(StraceTraceSet, syscall) {

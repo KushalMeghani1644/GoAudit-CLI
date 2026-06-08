@@ -17,6 +17,7 @@ var reasonExplanations = map[string]Explanation{
 	"SYMLINK_SENSITIVE_PATH": {"Symlink Attack", "Created a symlink targeting sensitive credential files"},
 	"REVERSE_SHELL":          {"Reverse Shell", "Opened an interactive reverse shell connection"},
 	"ENV_THEFT":              {"Environment Variable Theft", "Read /proc/self/environ to steal CI secrets and environment variables"},
+	"DATA_EXFIL":             {"Data Exfiltration", "Sent data to a non-registry host after accessing credentials or opening a suspicious outbound connection"},
 
 	// Warning — dynamic (strace)
 	"EXTERNAL_NETWORK":          {"Unknown Network Connection", "Connected to a host that isn't a known package registry"},
@@ -43,21 +44,33 @@ var reasonExplanations = map[string]Explanation{
 	"PNPM_RECENT_PACKAGE":            {"Recently Published", "Package was published very recently"},
 	"BUN_RECENT_PACKAGE":             {"Recently Published", "Package was published very recently"},
 
-	// Lifecycle content analysis
-	"NPM_LIFECYCLE_STAGED_DOWNLOADER":  {"Malicious Lifecycle Script", "postinstall script downloads and executes remote code"},
-	"NPM_LIFECYCLE_REVERSE_SHELL":      {"Malicious Lifecycle Script", "postinstall script opens a reverse shell"},
-	"NPM_LIFECYCLE_CREDENTIAL_READ":    {"Malicious Lifecycle Script", "postinstall script reads credential files"},
-	"NPM_LIFECYCLE_SCRIPT_OBFUSCATION": {"Obfuscated Lifecycle Script", "postinstall script uses obfuscation techniques"},
-	"NPM_LIFECYCLE_PERSISTENCE_WRITE":  {"Malicious Lifecycle Script", "postinstall script modifies system startup files"},
+	// Lifecycle content analysis (static)
+	"NPM_LIFECYCLE_STAGED_DOWNLOADER":  {"Malicious Lifecycle Script", "Lifecycle script references downloading and executing remote code"},
+	"PNPM_LIFECYCLE_STAGED_DOWNLOADER": {"Malicious Lifecycle Script", "Lifecycle script references downloading and executing remote code"},
+	"BUN_LIFECYCLE_STAGED_DOWNLOADER":  {"Malicious Lifecycle Script", "Lifecycle script references downloading and executing remote code"},
+	"NPM_LIFECYCLE_REVERSE_SHELL":      {"Malicious Lifecycle Script", "Lifecycle script references opening a reverse shell"},
+	"PNPM_LIFECYCLE_REVERSE_SHELL":     {"Malicious Lifecycle Script", "Lifecycle script references opening a reverse shell"},
+	"BUN_LIFECYCLE_REVERSE_SHELL":      {"Malicious Lifecycle Script", "Lifecycle script references opening a reverse shell"},
+	"NPM_LIFECYCLE_CREDENTIAL_READ":    {"Malicious Lifecycle Script", "Lifecycle script references reading credential files"},
+	"PNPM_LIFECYCLE_CREDENTIAL_READ":   {"Malicious Lifecycle Script", "Lifecycle script references reading credential files"},
+	"BUN_LIFECYCLE_CREDENTIAL_READ":    {"Malicious Lifecycle Script", "Lifecycle script references reading credential files"},
+	"NPM_LIFECYCLE_SCRIPT_OBFUSCATION": {"Obfuscated Lifecycle Script", "Lifecycle script uses obfuscation techniques"},
+	"PNPM_LIFECYCLE_SCRIPT_OBFUSCATION": {"Obfuscated Lifecycle Script", "Lifecycle script uses obfuscation techniques"},
+	"BUN_LIFECYCLE_SCRIPT_OBFUSCATION": {"Obfuscated Lifecycle Script", "Lifecycle script uses obfuscation techniques"},
+	"NPM_LIFECYCLE_PERSISTENCE_WRITE":  {"Malicious Lifecycle Script", "Lifecycle script references modifying system startup files"},
+	"PNPM_LIFECYCLE_PERSISTENCE_WRITE": {"Malicious Lifecycle Script", "Lifecycle script references modifying system startup files"},
+	"BUN_LIFECYCLE_PERSISTENCE_WRITE":  {"Malicious Lifecycle Script", "Lifecycle script references modifying system startup files"},
 
 	// Runtime
-	"RUNTIME_MISSING_TOOL":     {"Missing Tool", "A required tool was not found in the sandbox"},
-	"RUNTIME_PREP_FAILURE":     {"Sandbox Setup Failed", "The sandbox preparation phase failed"},
-	"RUNSC_FALLBACK_RUNC":      {"gVisor Fallback", "gVisor prep failed; scan retried using runc"},
-	"TARGET_COMMAND_FAILED":    {"Command Failed", "The target command exited with a non-zero status"},
-	"TARGET_COMMAND_NOT_FOUND": {"Command Not Found", "The target command was not found in the sandbox"},
-	"RUNTIME_METADATA":         {"Runtime Metadata", "Runtime metadata emitted by the sandbox for diagnostics"},
-	"SCRIPT_FETCHED":           {"Remote Script Fetched", "A remote script was retrieved for static analysis"},
+	"RUNTIME_MISSING_TOOL":      {"Missing Tool", "A required tool was not found in the sandbox"},
+	"RUNTIME_PREP_FAILURE":      {"Sandbox Setup Failed", "The sandbox preparation phase failed"},
+	"RUNTIME_TRACE_UNAVAILABLE": {"Runtime Trace Unavailable", "Sandbox command ran without usable target/probe runtime trace evidence"},
+	"RUNSC_FALLBACK_RUNC":       {"gVisor Fallback", "gVisor prep failed; scan retried using runc"},
+	"RUNSC_TRACE_FALLBACK_RUNC": {"gVisor Trace Fallback", "gVisor runtime tracing was unavailable; scan retried using runc"},
+	"TARGET_COMMAND_FAILED":     {"Command Failed", "The target command exited with a non-zero status"},
+	"TARGET_COMMAND_NOT_FOUND":  {"Command Not Found", "The target command was not found in the sandbox"},
+	"RUNTIME_METADATA":          {"Runtime Metadata", "Runtime metadata emitted by the sandbox for diagnostics"},
+	"SCRIPT_FETCHED":            {"Remote Script Fetched", "A remote script was retrieved for static analysis"},
 
 	// Policy
 	"POLICY_BLOCKED_DOMAIN":      {"Blocked Domain", "Remote script URL was blocked by the domain allowlist policy"},

@@ -24,6 +24,8 @@ var (
 	noCache        bool
 	warmCache      bool
 	cacheDir       string
+	targetTimeout  string
+	probeTimeout   string
 )
 
 type scanProfile struct {
@@ -42,6 +44,7 @@ var scanCmd = &cobra.Command{
 		profile := inferProfile(targetCmd)
 		reporter := report.NewReporter(ciMode, verbose)
 
+		runtimeTargetCmd := targetCmd
 		var probePackages []string
 		if !skipProbe {
 			probePackages = analyzer.ExtractPackageNamesFromCommand(targetCmd)
@@ -49,26 +52,33 @@ var scanCmd = &cobra.Command{
 
 		projectPath := ""
 		if analyzer.HasLocalPackageInstall(targetCmd) {
-			if wd, err := os.Getwd(); err == nil {
+			if rewritten, path, ok := analyzer.RewriteSingleLocalPackageInstall(targetCmd); ok {
+				runtimeTargetCmd = rewritten
+				projectPath = path
+			} else if wd, err := os.Getwd(); err == nil {
 				projectPath = wd
 			}
 		}
 
 		if warmCache {
 			warmSandboxCache(context.Background(), profile, reporter, pipelineOptions{
-				projectPath:   projectPath,
-				runAsRoot:     runAsRoot,
-				probePackages: probePackages,
-				skipProbe:     skipProbe,
+				projectPath:    projectPath,
+				runtimeCommand: runtimeTargetCmd,
+				runAsRoot:      runAsRoot,
+				probePackages:  probePackages,
+				skipProbe:      skipProbe,
 			})
 			return
 		}
 
 		runScanPipeline(context.Background(), targetCmd, profile, reporter, pipelineOptions{
-			projectPath:   projectPath,
-			runAsRoot:     runAsRoot,
-			probePackages: probePackages,
-			skipProbe:     skipProbe,
+			projectPath:    projectPath,
+			runtimeCommand: runtimeTargetCmd,
+			runAsRoot:      runAsRoot,
+			probePackages:  probePackages,
+			skipProbe:      skipProbe,
+			targetTimeout:  targetTimeout,
+			probeTimeout:   probeTimeout,
 		})
 	},
 }
@@ -105,5 +115,7 @@ func init() {
 	scanCmd.Flags().BoolVar(&noCache, "no-cache", false, "Disable sandbox caching for this run (no warm container is stored)")
 	scanCmd.Flags().BoolVar(&warmCache, "warm-cache", false, "Prepare and cache the sandbox without running a scan")
 	scanCmd.Flags().StringVar(&cacheDir, "cache-dir", "", "Custom directory for sandbox cache (or set GOAUDIT_CACHE_DIR)")
+	scanCmd.Flags().StringVar(&targetTimeout, "timeout", "", "Maximum time for the install/target command (default: profile-based)")
+	scanCmd.Flags().StringVar(&probeTimeout, "probe-timeout", "30s", "Maximum time for runtime import probe")
 	rootCmd.AddCommand(scanCmd)
 }

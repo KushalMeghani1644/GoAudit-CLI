@@ -127,6 +127,8 @@ var scanProjectCmd = &cobra.Command{
 			runAsRoot:       runAsRoot,
 			probePackages:   probePackages,
 			skipProbe:       skipProbe,
+			targetTimeout:   targetTimeout,
+			probeTimeout:    probeTimeout,
 		})
 	},
 }
@@ -165,6 +167,8 @@ func init() {
 	scanProjectCmd.Flags().BoolVar(&skipProbe, "skip-probe", false, "Skip runtime behavior probe after install")
 	scanProjectCmd.Flags().BoolVar(&warmCache, "warm-cache", false, "Prepare and cache the sandbox without running a scan")
 	scanProjectCmd.Flags().BoolVar(&probeAll, "probe-all", false, "Probe all direct dependencies, not just suspicious ones")
+	scanProjectCmd.Flags().StringVar(&targetTimeout, "timeout", "", "Maximum time for the install/target command (default: profile-based)")
+	scanProjectCmd.Flags().StringVar(&probeTimeout, "probe-timeout", "30s", "Maximum time for runtime import probe")
 	scanProjectCmd.Flags().StringVar(&upgradeMode, "upgrade-mode", "refresh-lock", "Upgrade strategy: refresh-lock, ncu, or update")
 	scanProjectCmd.Flags().StringVar(&managerOverride, "manager", "", "Force package manager: npm, pnpm, or bun")
 	scanProjectCmd.Flags().BoolVar(&includeTransitive, "include-transitive", false, "Also registry-check packages from package-lock.json")

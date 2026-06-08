@@ -34,6 +34,15 @@ func TestEvaluateInconclusiveForRuntimeIssue(t *testing.T) {
 	}
 }
 
+func TestEvaluateInconclusiveForRuntimeTraceUnavailable(t *testing.T) {
+	verdict, _ := Evaluate([]Finding{
+		{Severity: SeverityWarning, ReasonCode: "RUNTIME_TRACE_UNAVAILABLE"},
+	}, defaultOpts)
+	if verdict != VerdictInconclusive {
+		t.Fatalf("expected inconclusive verdict, got %s", verdict)
+	}
+}
+
 func TestEvaluateInconclusiveForTargetFailure(t *testing.T) {
 	verdict, _ := Evaluate([]Finding{
 		{Severity: SeverityWarning, ReasonCode: "TARGET_COMMAND_NOT_FOUND"},
@@ -60,6 +69,15 @@ func TestEvaluateEnvTheftIsMalicious(t *testing.T) {
 	}, defaultOpts)
 	if verdict != VerdictMalicious {
 		t.Fatalf("expected malicious verdict for ENV_THEFT, got %s", verdict)
+	}
+}
+
+func TestEvaluateDataExfilIsMalicious(t *testing.T) {
+	verdict, _ := Evaluate([]Finding{
+		{Severity: SeverityCritical, ReasonCode: "DATA_EXFIL"},
+	}, defaultOpts)
+	if verdict != VerdictMalicious {
+		t.Fatalf("expected malicious verdict for DATA_EXFIL, got %s", verdict)
 	}
 }
 
