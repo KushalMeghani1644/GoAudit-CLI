@@ -91,6 +91,25 @@ func TestHasLocalPackageInstall(t *testing.T) {
 	}
 }
 
+func TestRewriteSingleLocalPackageInstall(t *testing.T) {
+	dir := t.TempDir()
+	pkg := `{"name":"local-name","version":"1.0.0"}`
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rewritten, projectPath, ok := RewriteSingleLocalPackageInstall("npm install " + dir)
+	if !ok {
+		t.Fatal("expected rewrite to succeed")
+	}
+	if rewritten != "npm install ." {
+		t.Fatalf("unexpected rewritten command: %s", rewritten)
+	}
+	if projectPath != dir {
+		t.Fatalf("unexpected project path: %s", projectPath)
+	}
+}
+
 func findByReasonCode(findings []report.Finding, code string) *report.Finding {
 	for i := range findings {
 		if findings[i].ReasonCode == code {

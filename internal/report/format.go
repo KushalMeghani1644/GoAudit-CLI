@@ -19,57 +19,169 @@ func FormatHumanReport(findings []Finding, meta ReportMeta, verdict Verdict, con
 		title = "scan"
 	}
 
-	b.WriteString("╭─────────────────────────────────────────────╮\n")
-	b.WriteString(fmt.Sprintf("│  GoAudit Report: %-27s│\n", trimWithEllipsis(title, 27)))
-	b.WriteString("╰─────────────────────────────────────────────╯\n")
+	b.WriteString("GoAudit Report\n")
+	b.WriteString(fmt.Sprintf("Command: %s\n", title))
 
 	switch verdict {
 	case VerdictMalicious:
-		b.WriteString(fmt.Sprintf("🚨 Verdict: %s (confidence: %d)\n", verdict, confidence))
+		b.WriteString(fmt.Sprintf("Verdict: %s (confidence: %d)\n", verdict, confidence))
 	case VerdictSuspicious, VerdictInconclusive:
-		b.WriteString(fmt.Sprintf("⚠️  Verdict: %s (confidence: %d)\n", verdict, confidence))
+		b.WriteString(fmt.Sprintf("Verdict: %s (confidence: %d)\n", verdict, confidence))
 	default:
-		b.WriteString(fmt.Sprintf("✅ Verdict: %s (confidence: %d)\n", verdict, confidence))
+		b.WriteString(fmt.Sprintf("Verdict: %s (confidence: %d)\n", verdict, confidence))
 	}
 
 	if meta.SandboxRuntime == "runsc" {
-		b.WriteString("🛡️  Sandbox: gVisor (runsc)\n")
+		b.WriteString("Sandbox: gVisor (runsc)\n")
 	} else if meta.SandboxRuntime != "" {
-		b.WriteString(fmt.Sprintf("⚠️  Sandbox: %s (install gVisor for stronger isolation)\n", meta.SandboxRuntime))
+		b.WriteString(fmt.Sprintf("Sandbox: %s (install gVisor for stronger isolation)\n", meta.SandboxRuntime))
 	}
 
 	if meta.PackageName != "" {
 		if meta.PackageVersion != "" {
-			b.WriteString(fmt.Sprintf("📦 Package: %s@%s\n", meta.PackageName, meta.PackageVersion))
+			b.WriteString(fmt.Sprintf("Package: %s@%s\n", meta.PackageName, meta.PackageVersion))
 		} else {
-			b.WriteString(fmt.Sprintf("📦 Package: %s\n", meta.PackageName))
+			b.WriteString(fmt.Sprintf("Package: %s\n", meta.PackageName))
 		}
 	}
 
-	critical := filterBySeverity(findings, SeverityCritical)
-	warnings := filterBySeverity(findings, SeverityWarning)
-	info := filterBySeverity(findings, SeverityInfo)
+	displayFindings := suppressRedundantStatic(findings)
 
-	if len(critical) > 0 {
-		b.WriteString("🔴 Critical Findings\n")
-		writeFindingsList(&b, critical)
+	installCritical, installWarnings := splitInstallDynamic(displayFindings, SeverityCritical), splitInstallDynamic(displayFindings, SeverityWarning)
+	staticCritical, staticWarnings := splitStatic(displayFindings, SeverityCritical), splitStatic(displayFindings, SeverityWarning)
+	probeCritical, probeWarnings := splitProbeDynamic(displayFindings, SeverityCritical), splitProbeDynamic(displayFindings, SeverityWarning)
+	operationalWarnings := splitOperational(displayFindings, SeverityWarning)
+	operationalCritical := splitOperational(displayFindings, SeverityCritical)
+	info := filterBySeverity(displayFindings, SeverityInfo)
+
+	writeBehaviorSummary(&b, installFindings(displayFindings), verdict)
+
+	if len(installCritical) > 0 {
+		b.WriteString("Install-Time Behavior (observed in sandbox)\n")
+		writeFindingsList(&b, installCritical)
 	}
-	if len(warnings) > 0 {
-		b.WriteString("⚠️  Warnings\n")
-		writeFindingsList(&b, warnings)
+	if len(installWarnings) > 0 {
+		b.WriteString("Install-Time Warnings\n")
+		writeFindingsList(&b, installWarnings)
 	}
 
-	writeNetworkSummary(&b, findings)
-	writeProbeSummary(&b, findings)
+	writeProbeSummary(&b, displayFindings, len(installCritical)+len(installWarnings) > 0, len(probeCritical)+len(probeWarnings) > 0)
 
-	b.WriteString(fmt.Sprintf("📋 Summary: %d critical, %d warnings, %d informational\n", len(critical), len(warnings), len(info)))
+	if len(probeCritical) > 0 {
+		b.WriteString("Runtime Probe Findings\n")
+		writeFindingsList(&b, probeCritical)
+	}
+	if len(probeWarnings) > 0 {
+		b.WriteString("Runtime Probe Warnings\n")
+		writeFindingsList(&b, probeWarnings)
+	}
+
+	if len(staticCritical) > 0 {
+		b.WriteString("Static Analysis\n")
+		writeFindingsList(&b, staticCritical)
+	}
+	if len(staticWarnings) > 0 {
+		b.WriteString("Static Warnings\n")
+		writeFindingsList(&b, staticWarnings)
+	}
+
+	if len(operationalCritical) > 0 || len(operationalWarnings) > 0 {
+		b.WriteString("Sandbox Reliability\n")
+		writeFindingsList(&b, append(operationalCritical, operationalWarnings...))
+	}
+
+	writeNetworkSummary(&b, displayFindings)
+
+	totalCritical := len(installCritical) + len(probeCritical) + len(staticCritical) + len(operationalCritical)
+	totalWarnings := len(installWarnings) + len(probeWarnings) + len(staticWarnings) + len(operationalWarnings)
+	b.WriteString(fmt.Sprintf("Summary: %d critical (%d install-time, %d probe, %d static), %d warnings, %d informational\n",
+		totalCritical, len(installCritical), len(probeCritical), len(staticCritical), totalWarnings, len(info)))
 	if verdict == VerdictMalicious {
 		b.WriteString("   DO NOT INSTALL this package.\n")
 	} else {
 		b.WriteString("   Use --ci for full JSON output.\n")
 	}
-	// Replace \n with \r\n to prevent staircasing if the terminal is in raw/cbreak mode
 	return strings.ReplaceAll(b.String(), "\n", "\r\n")
+}
+
+func writeBehaviorSummary(b *strings.Builder, findings []Finding, verdict Verdict) {
+	observations := behaviorObservations(findings)
+	b.WriteString("What GoAudit Observed\n")
+	if len(observations) == 0 {
+		if verdict == VerdictClean {
+			b.WriteString("   1. GoAudit installed and observed the target in a sandbox.\n")
+			b.WriteString("   2. It did not observe credential reads, persistence writes, suspicious process execution, or unexpected outbound network connections.\n")
+		} else {
+			b.WriteString("   1. GoAudit did not collect enough clear behavioral evidence to describe the run.\n")
+		}
+		return
+	}
+	for i, observation := range observations {
+		b.WriteString(fmt.Sprintf("   %d. %s\n", i+1, observation))
+	}
+}
+
+func behaviorObservations(findings []Finding) []string {
+	seen := map[string]bool{}
+	var observations []string
+	add := func(key, text string) {
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		observations = append(observations, text)
+	}
+	for _, f := range findings {
+		switch f.ReasonCode {
+		case "CREDENTIAL_READ":
+			add("credentials", "During install, the target read credential-like files such as cloud credentials, SSH keys, Kubernetes config, npm tokens, or .env files.")
+		case "ENV_THEFT":
+			add("env", "During install, the target read /proc/self/environ, which exposes process environment variables and secrets.")
+		case "PERSISTENCE_WRITE":
+			add("persistence", "During install, the target modified files commonly used for persistence, such as shell startup files, cron, or SSH authorized keys.")
+		case "SYMLINK_SENSITIVE_PATH":
+			add("symlink", "During install, the target created symlinks that point at sensitive credential paths.")
+		case "SUSPICIOUS_EXEC":
+			add("exec", "During install, the target executed a suspicious program or shell command.")
+		case "DATA_EXFIL":
+			where := f.Host
+			if where == "" {
+				where = f.IP
+			}
+			if f.Port > 0 && where != "" {
+				where = fmt.Sprintf("%s:%d", where, f.Port)
+			}
+			if where == "" {
+				where = "a non-registry host"
+			}
+			add("exfil", fmt.Sprintf("During install, the target attempted to exfiltrate data to %s after accessing credentials.", where))
+		case "EXTERNAL_NETWORK", "INTERNAL_NETWORK", "CLOUD_METADATA_ACCESS":
+			where := f.Host
+			if where == "" {
+				where = f.IP
+			}
+			if f.Port > 0 && where != "" {
+				where = fmt.Sprintf("%s:%d", where, f.Port)
+			}
+			if where == "" {
+				where = "an external host"
+			}
+			if f.ReasonCode == "CLOUD_METADATA_ACCESS" {
+				add("metadata", "During install, the target attempted to contact the cloud metadata service, a common way to steal cloud credentials.")
+			} else if f.ReasonCode == "INTERNAL_NETWORK" {
+				add("internal-network", fmt.Sprintf("During install, the target attempted to contact an internal or link-local network address: %s.", where))
+			} else {
+				add("network", fmt.Sprintf("During install, the target attempted an unexpected outbound network connection to %s.", where))
+			}
+		case "BACKDOOR_LISTENER":
+			add("listener", fmt.Sprintf("During install, the target opened a listening network port inside the sandbox: %d.", f.Port))
+		case "TARGET_COMMAND_TIMEOUT":
+			add("timeout", "The target did not finish before GoAudit's timeout, so the report includes behavior observed before timeout.")
+		case "RUNTIME_TRACE_UNAVAILABLE":
+			add("trace", "GoAudit could not fully verify one sandbox trace phase; reliability details are listed below.")
+		}
+	}
+	return observations
 }
 
 func writeFindingsList(b *strings.Builder, findings []Finding) {
@@ -85,9 +197,29 @@ func writeFindingsList(b *strings.Builder, findings []Finding) {
 		} else {
 			b.WriteString(fmt.Sprintf("   %d. %s\n", i+1, strings.ToUpper(title)))
 		}
-		if ex.Detail != "" {
-			b.WriteString(fmt.Sprintf("      └─ %s\n", ex.Detail))
+		detail := lifecycleDetail(f, ex.Detail)
+		if detail != "" {
+			b.WriteString(fmt.Sprintf("      Details: %s\n", detail))
 		}
+	}
+}
+
+func lifecycleDetail(f Finding, fallback string) string {
+	switch f.ReasonCode {
+	case "NPM_LIFECYCLE_STAGED_DOWNLOADER", "PNPM_LIFECYCLE_STAGED_DOWNLOADER", "BUN_LIFECYCLE_STAGED_DOWNLOADER",
+		"NPM_LIFECYCLE_REVERSE_SHELL", "PNPM_LIFECYCLE_REVERSE_SHELL", "BUN_LIFECYCLE_REVERSE_SHELL",
+		"NPM_LIFECYCLE_CREDENTIAL_READ", "PNPM_LIFECYCLE_CREDENTIAL_READ", "BUN_LIFECYCLE_CREDENTIAL_READ",
+		"NPM_LIFECYCLE_SCRIPT_OBFUSCATION", "PNPM_LIFECYCLE_SCRIPT_OBFUSCATION", "BUN_LIFECYCLE_SCRIPT_OBFUSCATION",
+		"NPM_LIFECYCLE_PERSISTENCE_WRITE", "PNPM_LIFECYCLE_PERSISTENCE_WRITE", "BUN_LIFECYCLE_PERSISTENCE_WRITE":
+		if f.Path == "" {
+			return "Lifecycle script matched a dangerous pattern during static analysis"
+		}
+		if idx := strings.LastIndex(f.Path, ":"); idx >= 0 && idx < len(f.Path)-1 {
+			return fmt.Sprintf("%s script matched a dangerous pattern during static analysis", f.Path[idx+1:])
+		}
+		return "Lifecycle script matched a dangerous pattern during static analysis"
+	default:
+		return fallback
 	}
 }
 
@@ -151,42 +283,184 @@ func writeNetworkSummary(b *strings.Builder, findings []Finding) {
 	})
 
 	if registryOnly {
-		b.WriteString("🌐 Network Activity (expected)\n")
+		b.WriteString("Network Activity (expected)\n")
 	} else {
-		b.WriteString("🌐 Network Activity\n")
+		b.WriteString("Network Activity\n")
 	}
 	for _, h := range hosts {
 		annotation := ""
 		if knownRegistryHosts[strings.ToLower(h.host)] {
 			annotation = " (registry)"
 		}
-		b.WriteString(fmt.Sprintf("   • %d connection(s) to %s%s\n", h.conns, h.host, annotation))
+		b.WriteString(fmt.Sprintf("   - %d connection(s) to %s%s\n", h.conns, h.host, annotation))
 	}
-	b.WriteString(fmt.Sprintf("   • %d connection(s) to %d host(s)\n", total, len(hosts)))
+	b.WriteString(fmt.Sprintf("   - %d connection(s) to %d host(s)\n", total, len(hosts)))
 }
 
-func writeProbeSummary(b *strings.Builder, findings []Finding) {
+func writeProbeSummary(b *strings.Builder, findings []Finding, hasInstallRisk, hasProbeRisk bool) {
 	hasProbeMeta := false
-	hasProbeRisk := false
 	for _, f := range findings {
 		if f.ReasonCode == "RUNTIME_METADATA" && strings.Contains(f.Evidence, "phase=probe") {
 			hasProbeMeta = true
-			continue
-		}
-		if strings.Contains(f.Evidence, "[runtime probe]") && (f.Severity == SeverityCritical || f.Severity == SeverityWarning) {
-			hasProbeRisk = true
+			break
 		}
 	}
 	if !hasProbeMeta {
 		return
 	}
-	b.WriteString("🔍 Runtime Probe\n")
-	if hasProbeRisk {
-		b.WriteString("   • Probe observed suspicious runtime behavior\n")
-	} else {
-		b.WriteString("   • Runtime probe executed successfully\n")
-		b.WriteString("   • No credential access, suspicious writes, or unknown exfiltration detected\n")
+	b.WriteString("Runtime Probe\n")
+	switch {
+	case hasProbeRisk:
+		b.WriteString("   - Runtime import probe observed suspicious behavior\n")
+	case hasInstallRisk:
+		b.WriteString("   - Runtime import probe completed without re-triggering malicious behavior\n")
+		b.WriteString("   - Malicious activity was already observed during install-time sandbox tracing\n")
+	default:
+		b.WriteString("   - Runtime import probe completed without suspicious behavior\n")
+		b.WriteString("   - No credential access, suspicious writes, or unknown exfiltration detected during import\n")
 	}
+}
+
+func isProbeFinding(f Finding) bool {
+	return strings.Contains(f.Evidence, "[runtime probe]")
+}
+
+func isInstallFinding(f Finding) bool {
+	return isDynamicFinding(f) && !isProbeFinding(f)
+}
+
+func isDynamicFinding(f Finding) bool {
+	switch f.ReasonCode {
+	case "RUNTIME_METADATA", "RUNTIME_MISSING_TOOL", "RUNTIME_PREP_FAILURE", "RUNTIME_TRACE_UNAVAILABLE",
+		"RUNTIME_PROJECT_COPY_FAILURE", "RUNSC_FALLBACK_RUNC", "RUNSC_TRACE_FALLBACK_RUNC",
+		"TARGET_COMMAND_FAILED", "TARGET_COMMAND_NOT_FOUND", "TARGET_COMMAND_TIMEOUT":
+		return false
+	}
+	switch f.Type {
+	case "fs_read", "fs_write", "exec", "network", "privilege":
+		return true
+	}
+	return false
+}
+
+func isStaticFinding(f Finding) bool {
+	if isDynamicFinding(f) {
+		return false
+	}
+	switch f.Type {
+	case "command", "script", "npm", "pnpm", "bun", "policy":
+		return true
+	}
+	if strings.HasPrefix(f.ReasonCode, "NPM_") || strings.HasPrefix(f.ReasonCode, "PNPM_") || strings.HasPrefix(f.ReasonCode, "BUN_") {
+		return true
+	}
+	switch f.ReasonCode {
+	case "CURL_PIPE_SHELL", "SCRIPT_OBFUSCATION", "STAGED_DOWNLOADER", "REVERSE_SHELL",
+		"POLICY_BLOCKED_DOMAIN", "INCONCLUSIVE_REMOTE_FETCH", "INCONCLUSIVE_NPM_METADATA",
+		"INCONCLUSIVE_PNPM_METADATA", "INCONCLUSIVE_BUN_METADATA", "SCRIPT_FETCHED":
+		return true
+	}
+	return false
+}
+
+func installFindings(findings []Finding) []Finding {
+	out := make([]Finding, 0)
+	for _, f := range findings {
+		if isInstallFinding(f) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func splitInstallDynamic(findings []Finding, severity Severity) []Finding {
+	out := make([]Finding, 0)
+	for _, f := range findings {
+		if f.Severity == severity && isInstallFinding(f) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func splitProbeDynamic(findings []Finding, severity Severity) []Finding {
+	out := make([]Finding, 0)
+	for _, f := range findings {
+		if f.Severity == severity && isProbeFinding(f) && isDynamicFinding(f) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func splitStatic(findings []Finding, severity Severity) []Finding {
+	out := make([]Finding, 0)
+	for _, f := range findings {
+		if f.Severity == severity && isStaticFinding(f) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func splitOperational(findings []Finding, severity Severity) []Finding {
+	out := make([]Finding, 0)
+	for _, f := range findings {
+		if f.Severity == severity && isOperationalFinding(f) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func isOperationalFinding(f Finding) bool {
+	switch f.ReasonCode {
+	case "RUNTIME_MISSING_TOOL", "RUNTIME_PREP_FAILURE", "RUNTIME_TRACE_UNAVAILABLE",
+		"RUNTIME_PROJECT_COPY_FAILURE", "RUNSC_FALLBACK_RUNC", "RUNSC_TRACE_FALLBACK_RUNC",
+		"TARGET_COMMAND_FAILED", "TARGET_COMMAND_NOT_FOUND", "TARGET_COMMAND_TIMEOUT":
+		return true
+	}
+	return false
+}
+
+func suppressRedundantStatic(findings []Finding) []Finding {
+	confirmed := map[string]bool{}
+	for _, f := range findings {
+		if !isInstallFinding(f) {
+			continue
+		}
+		switch f.ReasonCode {
+		case "CREDENTIAL_READ", "ENV_THEFT":
+			confirmed["credential"] = true
+		case "PERSISTENCE_WRITE":
+			confirmed["persistence"] = true
+		case "DATA_EXFIL", "EXTERNAL_NETWORK", "INTERNAL_NETWORK":
+			confirmed["network"] = true
+		case "SUSPICIOUS_EXEC", "REVERSE_SHELL":
+			confirmed["exec"] = true
+		}
+	}
+
+	out := make([]Finding, 0, len(findings))
+	for _, f := range findings {
+		if !isStaticFinding(f) || !strings.Contains(f.ReasonCode, "LIFECYCLE_") {
+			out = append(out, f)
+			continue
+		}
+		switch {
+		case strings.Contains(f.ReasonCode, "CREDENTIAL_READ") && confirmed["credential"]:
+			continue
+		case strings.Contains(f.ReasonCode, "PERSISTENCE_WRITE") && confirmed["persistence"]:
+			continue
+		case strings.Contains(f.ReasonCode, "STAGED_DOWNLOADER") && confirmed["network"]:
+			continue
+		case strings.Contains(f.ReasonCode, "REVERSE_SHELL") && confirmed["exec"]:
+			continue
+		default:
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 func filterBySeverity(findings []Finding, severity Severity) []Finding {

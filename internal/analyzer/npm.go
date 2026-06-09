@@ -531,6 +531,76 @@ func HasLocalPackageInstall(command string) bool {
 	return false
 }
 
+// RewriteSingleLocalPackageInstall rewrites a single local package install to run
+// from the package directory itself. This lets the sandbox mount only that
+// package instead of copying the caller's whole working directory.
+func RewriteSingleLocalPackageInstall(command string) (string, string, bool) {
+	type managerOps struct {
+		name string
+		ops  []string
+	}
+	managers := []managerOps{
+		{"npm", []string{"install", "i"}},
+		{"pnpm", []string{"add", "install", "i"}},
+		{"bun", []string{"add"}},
+	}
+	parts := strings.Fields(command)
+	if len(parts) < 3 {
+		return "", "", false
+	}
+	for _, m := range managers {
+		if strings.ToLower(parts[0]) != m.name {
+			continue
+		}
+		installIdx := -1
+		for i := 1; i < len(parts); i++ {
+			for _, op := range m.ops {
+				if parts[i] == op {
+					installIdx = i
+					break
+				}
+			}
+			if installIdx != -1 {
+				break
+			}
+		}
+		if installIdx == -1 {
+			continue
+		}
+		localIdx := -1
+		localCount := 0
+		for i := installIdx + 1; i < len(parts); i++ {
+			if parts[i] == "&&" || parts[i] == ";" || parts[i] == "|" {
+				break
+			}
+			if strings.HasPrefix(parts[i], "-") {
+				continue
+			}
+			if isLocalPathSpec(parts[i]) {
+				localIdx = i
+				localCount++
+			}
+		}
+		if localCount != 1 {
+			return "", "", false
+		}
+		pkgPath := localPackagePath(parts[localIdx])
+		if pkgPath == "" {
+			return "", "", false
+		}
+		absPath, err := filepath.Abs(pkgPath)
+		if err != nil {
+			return "", "", false
+		}
+		if info, err := os.Stat(absPath); err != nil || !info.IsDir() {
+			return "", "", false
+		}
+		parts[localIdx] = "."
+		return strings.Join(parts, " "), absPath, true
+	}
+	return "", "", false
+}
+
 func ReadLocalPackageName(spec string) string {
 	pkgPath := localPackagePath(spec)
 	if pkgPath == "" {

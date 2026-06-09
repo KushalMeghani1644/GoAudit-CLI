@@ -24,6 +24,8 @@ var (
 	noCache        bool
 	warmCache      bool
 	cacheDir       string
+	targetTimeout  string
+	probeTimeout   string
 )
 
 type scanProfile struct {
@@ -47,30 +49,55 @@ var scanCmd = &cobra.Command{
 			probePackages = analyzer.ExtractPackageNamesFromCommand(targetCmd)
 		}
 
-		projectPath := ""
-		if analyzer.HasLocalPackageInstall(targetCmd) {
-			if wd, err := os.Getwd(); err == nil {
-				projectPath = wd
-			}
-		}
+		runtimeTargetCmd, projectPath, localFindings := prepareLocalPackageInstall(targetCmd)
 
 		if warmCache {
 			warmSandboxCache(context.Background(), profile, reporter, pipelineOptions{
-				projectPath:   projectPath,
-				runAsRoot:     runAsRoot,
-				probePackages: probePackages,
-				skipProbe:     skipProbe,
+				projectPath:    projectPath,
+				runtimeCommand: runtimeTargetCmd,
+				runAsRoot:      runAsRoot,
+				probePackages:  probePackages,
+				skipProbe:      skipProbe,
 			})
 			return
 		}
 
 		runScanPipeline(context.Background(), targetCmd, profile, reporter, pipelineOptions{
-			projectPath:   projectPath,
-			runAsRoot:     runAsRoot,
-			probePackages: probePackages,
-			skipProbe:     skipProbe,
+			projectPath:    projectPath,
+			runtimeCommand: runtimeTargetCmd,
+			priorFindings:  localFindings,
+			runAsRoot:      runAsRoot,
+			probePackages:  probePackages,
+			skipProbe:      skipProbe,
+			targetTimeout:  targetTimeout,
+			probeTimeout:   probeTimeout,
 		})
 	},
+}
+
+func prepareLocalPackageInstall(targetCmd string) (string, string, []report.Finding) {
+	if !analyzer.HasLocalPackageInstall(targetCmd) {
+		return targetCmd, "", nil
+	}
+	if rewritten, path, ok := analyzer.RewriteSingleLocalPackageInstall(targetCmd); ok {
+		return rewritten, path, nil
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return targetCmd, "", []report.Finding{localPackageRewriteUnavailableFinding(targetCmd, err.Error())}
+	}
+	return targetCmd, wd, []report.Finding{localPackageRewriteUnavailableFinding(targetCmd, "local package install contains multiple or unsupported local path specs; mounted the current working directory without rewriting the command")}
+}
+
+func localPackageRewriteUnavailableFinding(targetCmd, evidence string) report.Finding {
+	return report.Finding{
+		Severity:   report.SeverityWarning,
+		Type:       "runtime",
+		ReasonCode: "LOCAL_PACKAGE_REWRITE_UNAVAILABLE",
+		Path:       targetCmd,
+		Confidence: 70,
+		Evidence:   evidence,
+	}
 }
 
 func inferProfile(cmd string) scanProfile {
@@ -105,5 +132,7 @@ func init() {
 	scanCmd.Flags().BoolVar(&noCache, "no-cache", false, "Disable sandbox caching for this run (no warm container is stored)")
 	scanCmd.Flags().BoolVar(&warmCache, "warm-cache", false, "Prepare and cache the sandbox without running a scan")
 	scanCmd.Flags().StringVar(&cacheDir, "cache-dir", "", "Custom directory for sandbox cache (or set GOAUDIT_CACHE_DIR)")
+	scanCmd.Flags().StringVar(&targetTimeout, "timeout", "", "Maximum time for the install/target command (default: profile-based)")
+	scanCmd.Flags().StringVar(&probeTimeout, "probe-timeout", "30s", "Maximum time for runtime import probe")
 	rootCmd.AddCommand(scanCmd)
 }

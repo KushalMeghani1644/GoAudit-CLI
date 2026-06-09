@@ -16,6 +16,7 @@ import (
 
 type pipelineOptions struct {
 	projectPath     string
+	runtimeCommand  string
 	skipStatic      bool
 	priorFindings   []report.Finding
 	allowNetwork    bool
@@ -23,6 +24,8 @@ type pipelineOptions struct {
 	scanProjectMode bool
 	probePackages   []string
 	skipProbe       bool
+	targetTimeout   string
+	probeTimeout    string
 }
 
 // resolveRegistryIPs resolves known registry hostnames to IPs for classification.
@@ -45,7 +48,30 @@ func resolveRegistryIPs(profileName string) map[string]string {
 	return result
 }
 
+func networkEnabledForProfile(profileName string, allowNetwork bool) bool {
+	if networkMode == "auto" {
+		switch profileName {
+		case "npm", "pnpm", "bun", "shell":
+			return true
+		default:
+			return false
+		}
+	}
+	if networkMode == "on" {
+		return true
+	}
+	if networkMode == "off" {
+		return false
+	}
+	return allowNetwork
+}
+
 func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile, reporter *report.Reporter, opts pipelineOptions) {
+	runTargetCmd := targetCmd
+	if strings.TrimSpace(opts.runtimeCommand) != "" {
+		runTargetCmd = opts.runtimeCommand
+	}
+
 	findings := append([]report.Finding{}, opts.priorFindings...)
 
 	reporter.StartProgress("Running static analysis...")
@@ -82,25 +108,17 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 	}
 
 	// Determine network policy
-	networkEnabled := opts.allowNetwork
-	if networkMode == "auto" {
-		switch profile.Name {
-		case "npm", "pnpm", "bun":
-			networkEnabled = true
-		default:
-			networkEnabled = false
-		}
-	} else if networkMode == "on" {
-		networkEnabled = true
-	} else if networkMode == "off" {
-		networkEnabled = false
-	}
+	networkEnabled := networkEnabledForProfile(profile.Name, opts.allowNetwork)
 
-	// Append runtime probe
-	finalCmd := targetCmd
+	probeScript := ""
 	if len(opts.probePackages) > 0 && !opts.skipProbe && isNodeProfile(profile.Name) {
-		probeScript := probe.GenerateNodeProbeScript(opts.probePackages, probe.DefaultTimeoutSec)
-		finalCmd = targetCmd + "\n" + probeScript
+		probeScript = probe.GenerateNodeProbeScript(opts.probePackages, probeTimeoutSeconds(opts.probeTimeout))
+	}
+	if opts.targetTimeout == "" {
+		opts.targetTimeout = defaultTargetTimeout(profile.Name)
+	}
+	if opts.probeTimeout == "" {
+		opts.probeTimeout = "30s"
 	}
 
 	s, err := sandbox.NewSandbox(ctx, profile.Image, sandbox.SandboxOptions{
@@ -259,9 +277,10 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 	// If using cached sandbox, warm-start via ExecScan; otherwise do the normal cold path.
 	var dynamicFindings []report.Finding
 	var sandboxRuntime string
+	var traceHealth parser.TraceHealth
 
 	if usedCache {
-		dynamicFindings, sandboxRuntime, err = runCachedSandboxAndParse(ctx, s, profile, finalCmd, opts, registryIPs, reporter)
+		dynamicFindings, sandboxRuntime, traceHealth, err = runCachedSandboxAndParse(ctx, s, profile, runTargetCmd, probeScript, opts, registryIPs, reporter)
 		if err != nil {
 			// Cache might be stale; invalidate and fall through to cold path.
 			if cache != nil {
@@ -279,7 +298,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 				reporter.StopProgress()
 				reporter.Fatalf("Failed to prepare image: %v\n", err)
 			}
-			dynamicFindings, sandboxRuntime, err = runSandboxAndParse(ctx, s, profile, finalCmd, opts, registryIPs, reporter)
+			dynamicFindings, sandboxRuntime, traceHealth, err = runSandboxAndParse(ctx, s, profile, runTargetCmd, probeScript, opts, registryIPs, reporter)
 			if err != nil {
 				s.Cleanup(ctx, false)
 				reporter.StopProgress()
@@ -287,7 +306,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 			}
 		}
 	} else {
-		dynamicFindings, sandboxRuntime, err = runSandboxAndParse(ctx, s, profile, finalCmd, opts, registryIPs, reporter)
+		dynamicFindings, sandboxRuntime, traceHealth, err = runSandboxAndParse(ctx, s, profile, runTargetCmd, probeScript, opts, registryIPs, reporter)
 		if err != nil {
 			s.Cleanup(ctx, false)
 			reporter.StopProgress()
@@ -295,24 +314,18 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 		}
 	}
 
-	// If gVisor prep failed (often apt-get under runsc), retry once with runc.
-	if s.Runtime() == "runsc" && parser.HasPrepFailure(dynamicFindings) {
+	fallbackPlan, needsRuncFallback := planRunscDynamicFallback(sandboxRuntime, dynamicFindings, traceHealth)
+	if needsRuncFallback {
 		s.Cleanup(ctx, false)
+		for _, fallbackFinding := range fallbackPlan.Warnings {
+			findings = append(findings, fallbackFinding)
+			reporter.PrintLiveFinding(fallbackFinding)
+		}
 		if !ciMode {
 			reporter.StopProgress()
-			fmt.Print("\033[33m[WARNING] gVisor sandbox prep failed (tools/apt). Retrying with runc; npm install behavior is still scanned.\033[0m\r\n")
+			fmt.Print(runscFallbackWarningMessage(fallbackPlan.Reason))
 			reporter.StartProgress("Retrying with runc...")
 		}
-		fallback := report.Finding{
-			Severity:   report.SeverityWarning,
-			Type:       "runtime",
-			ReasonCode: "RUNSC_FALLBACK_RUNC",
-			Path:       "sandbox",
-			Confidence: 85,
-			Evidence:   "gVisor prep failed; retried scan using runc",
-		}
-		findings = append(findings, fallback)
-		reporter.PrintLiveFinding(fallback)
 
 		s.SetRuntime("")
 		if isNodeProfile(profile.Name) && profile.Image == sandbox.NodeSandboxImage {
@@ -333,7 +346,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 			}
 		}
 		if usedRuncCache {
-			dynamicFindings, sandboxRuntime, err = runCachedSandboxAndParse(ctx, s, profile, finalCmd, opts, registryIPs, reporter)
+			dynamicFindings, sandboxRuntime, traceHealth, err = runCachedSandboxAndParse(ctx, s, profile, runTargetCmd, probeScript, opts, registryIPs, reporter)
 			usedCache = true
 		} else {
 			if _, err := s.EnsureImage(ctx); err != nil {
@@ -341,13 +354,20 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 				reporter.StopProgress()
 				reporter.Fatalf("Failed to prepare image after runc fallback: %v\n", err)
 			}
-			dynamicFindings, sandboxRuntime, err = runSandboxAndParse(ctx, s, profile, finalCmd, opts, registryIPs, reporter)
+			dynamicFindings, sandboxRuntime, traceHealth, err = runSandboxAndParse(ctx, s, profile, runTargetCmd, probeScript, opts, registryIPs, reporter)
+			usedCache = false
 		}
 		if err != nil {
 			s.Cleanup(ctx, false)
 			reporter.StopProgress()
 			reporter.Fatalf("Failed to run command after runc fallback: %v\n", err)
 		}
+	}
+
+	if !traceHealth.Usable() {
+		traceWarning := runtimeTraceUnavailableFinding(traceHealth, sandboxRuntime)
+		findings = append(findings, traceWarning)
+		reporter.PrintLiveFinding(traceWarning)
 	}
 
 	findings = append(findings, dynamicFindings...)
@@ -403,19 +423,7 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 		reporter.Fatalf("--warm-cache cannot be used for project-mounted scans yet\n")
 	}
 
-	networkEnabled := opts.allowNetwork
-	if networkMode == "auto" {
-		switch profile.Name {
-		case "npm", "pnpm", "bun":
-			networkEnabled = true
-		default:
-			networkEnabled = false
-		}
-	} else if networkMode == "on" {
-		networkEnabled = true
-	} else if networkMode == "off" {
-		networkEnabled = false
-	}
+	networkEnabled := networkEnabledForProfile(profile.Name, opts.allowNetwork)
 
 	reporter.StartProgress("Preparing sandbox cache...")
 
@@ -427,7 +435,7 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 	defer cache.Close()
 
 	s, err := sandbox.NewSandbox(ctx, profile.Image, sandbox.SandboxOptions{
-		NetworkEnabled: true,
+		NetworkEnabled: networkEnabled,
 		RunAsRoot:      opts.runAsRoot,
 	})
 	if err != nil {
@@ -527,11 +535,12 @@ func runSandboxAndParse(
 	ctx context.Context,
 	s *sandbox.Sandbox,
 	profile scanProfile,
-	finalCmd string,
+	targetCmd string,
+	probeScript string,
 	opts pipelineOptions,
 	registryIPs map[string]string,
 	reporter *report.Reporter,
-) ([]report.Finding, string, error) {
+) ([]report.Finding, string, parser.TraceHealth, error) {
 	if len(opts.probePackages) > 0 && !opts.skipProbe {
 		reporter.UpdateProgress(fmt.Sprintf("Running in sandbox + probing %d package(s)...", len(opts.probePackages)))
 	}
@@ -539,26 +548,27 @@ func runSandboxAndParse(
 	var logStream io.Reader
 	var err error
 	if opts.projectPath != "" {
-		logStream, err = s.RunProjectCommand(ctx, finalCmd, opts.projectPath, profile.Name, profile.Image, profile.RequiredTools, profile.SetupCommands)
+		logStream, err = s.RunProjectCommand(ctx, targetCmd, probeScript, opts.projectPath, profile.Name, profile.Image, profile.RequiredTools, profile.SetupCommands, opts.targetTimeout, opts.probeTimeout)
 	} else {
-		logStream, err = s.RunCommand(ctx, finalCmd, profile.Name, profile.Image, profile.RequiredTools, profile.SetupCommands)
+		logStream, err = s.RunCommand(ctx, targetCmd, probeScript, profile.Name, profile.Image, profile.RequiredTools, profile.SetupCommands, opts.targetTimeout, opts.probeTimeout)
 	}
 	if err != nil {
-		return nil, "", err
+		return nil, "", parser.TraceHealth{}, err
 	}
 
-	dynamicFindings, err := parser.ParseStream(logStream, reporter, parser.ParseOptions{
+	dynamicFindings, traceHealth, err := parser.ParseStreamWithHealth(logStream, reporter, parser.ParseOptions{
 		KnownRegistryIPs: registryIPs,
+		ProbeExpected:    len(opts.probePackages) > 0 && !opts.skipProbe,
 	})
 	if err != nil {
-		return nil, "", err
+		return nil, "", traceHealth, err
 	}
 
 	runtime := s.Runtime()
 	if runtime == "" {
 		runtime = "runc"
 	}
-	return dynamicFindings, runtime, nil
+	return dynamicFindings, runtime, traceHealth, nil
 }
 
 // runCachedSandboxAndParse runs a scan on a cached (warm) container via ExecScan.
@@ -566,32 +576,120 @@ func runCachedSandboxAndParse(
 	ctx context.Context,
 	s *sandbox.Sandbox,
 	profile scanProfile,
-	finalCmd string,
+	targetCmd string,
+	probeScript string,
 	opts pipelineOptions,
 	registryIPs map[string]string,
 	reporter *report.Reporter,
-) ([]report.Finding, string, error) {
+) ([]report.Finding, string, parser.TraceHealth, error) {
 	if len(opts.probePackages) > 0 && !opts.skipProbe {
 		reporter.UpdateProgress(fmt.Sprintf("Running in cached sandbox + probing %d package(s)...", len(opts.probePackages)))
 	}
 
-	logStream, err := s.ExecScan(ctx, finalCmd, profile.Name, profile.Image, opts.projectPath)
+	logStream, err := s.ExecScan(ctx, targetCmd, probeScript, profile.Name, profile.Image, opts.projectPath, opts.targetTimeout, opts.probeTimeout)
 	if err != nil {
-		return nil, "", err
+		return nil, "", parser.TraceHealth{}, err
 	}
 
-	dynamicFindings, err := parser.ParseStream(logStream, reporter, parser.ParseOptions{
+	dynamicFindings, traceHealth, err := parser.ParseStreamWithHealth(logStream, reporter, parser.ParseOptions{
 		KnownRegistryIPs: registryIPs,
+		ProbeExpected:    len(opts.probePackages) > 0 && !opts.skipProbe,
 	})
 	if err != nil {
-		return nil, "", err
+		return nil, "", traceHealth, err
 	}
 
 	runtime := s.Runtime()
 	if runtime == "" {
 		runtime = "runc"
 	}
-	return dynamicFindings, runtime, nil
+	return dynamicFindings, runtime, traceHealth, nil
+}
+
+func runtimeTraceUnavailableFinding(health parser.TraceHealth, runtime string) report.Finding {
+	if runtime == "" {
+		runtime = "runc"
+	}
+	return report.Finding{
+		Severity:   report.SeverityWarning,
+		Type:       "runtime",
+		ReasonCode: "RUNTIME_TRACE_UNAVAILABLE",
+		Path:       "sandbox",
+		Confidence: 90,
+		Evidence:   fmt.Sprintf("%s runtime trace incomplete: %s", runtime, strings.Join(traceHealthMissingReasons(health), ", ")),
+	}
+}
+
+func runscTraceFallbackFinding(health parser.TraceHealth) report.Finding {
+	return report.Finding{
+		Severity:   report.SeverityWarning,
+		Type:       "runtime",
+		ReasonCode: "RUNSC_TRACE_FALLBACK_RUNC",
+		Path:       "sandbox",
+		Confidence: 85,
+		Evidence:   fmt.Sprintf("gVisor runtime trace unavailable; retried scan using runc: %s", strings.Join(traceHealthMissingReasons(health), ", ")),
+	}
+}
+
+type runscDynamicFallbackPlan struct {
+	Reason   string
+	Warnings []report.Finding
+}
+
+func planRunscDynamicFallback(runtime string, dynamicFindings []report.Finding, traceHealth parser.TraceHealth) (runscDynamicFallbackPlan, bool) {
+	if runtime != "runsc" {
+		return runscDynamicFallbackPlan{}, false
+	}
+	if parser.HasPrepFailure(dynamicFindings) {
+		return runscDynamicFallbackPlan{
+			Reason: "prep_failed",
+			Warnings: []report.Finding{{
+				Severity:   report.SeverityWarning,
+				Type:       "runtime",
+				ReasonCode: "RUNSC_FALLBACK_RUNC",
+				Path:       "sandbox",
+				Confidence: 85,
+				Evidence:   "gVisor prep failed; retried scan using runc",
+			}},
+		}, true
+	}
+	if !traceHealth.TargetPhaseObserved || !traceHealth.TargetSyscallObserved {
+		return runscDynamicFallbackPlan{
+			Reason: "trace_unavailable",
+			Warnings: []report.Finding{
+				runtimeTraceUnavailableFinding(traceHealth, "runsc"),
+				runscTraceFallbackFinding(traceHealth),
+			},
+		}, true
+	}
+	return runscDynamicFallbackPlan{}, false
+}
+
+func runscFallbackWarningMessage(reason string) string {
+	if reason == "prep_failed" {
+		return "\033[33m[WARNING] gVisor sandbox prep failed (tools/apt). Retrying with runc; npm install behavior is still scanned.\033[0m\r\n"
+	}
+	return "\033[33m[WARNING] gVisor runtime tracing was unavailable. Retrying with runc; weaker isolation will be noted in the report.\033[0m\r\n"
+}
+
+func traceHealthMissingReasons(health parser.TraceHealth) []string {
+	var reasons []string
+	if !health.TargetPhaseObserved {
+		reasons = append(reasons, "missing target phase marker")
+	}
+	if !health.TargetExitObserved {
+		reasons = append(reasons, "missing target exit marker")
+	}
+	if !health.TargetSyscallObserved {
+		reasons = append(reasons, "missing target syscall evidence")
+	}
+	if health.ProbeExpected && !health.ProbePhaseObserved {
+		reasons = append(reasons, "missing probe phase marker")
+	}
+	if len(reasons) == 0 {
+		reasons = append(reasons, "unknown trace health failure")
+	}
+	return reasons
 }
 
 func isNodeProfile(name string) bool {
@@ -615,6 +713,27 @@ func defaultImageForProfile(profileName string) string {
 		return sandbox.DefaultBunImage
 	}
 	return sandbox.DefaultNodeImage
+}
+
+func defaultTargetTimeout(profileName string) string {
+	switch profileName {
+	case "npm", "pnpm", "bun":
+		return "180s"
+	case "shell":
+		return "120s"
+	default:
+		return "120s"
+	}
+}
+
+func probeTimeoutSeconds(timeoutValue string) int {
+	if strings.HasSuffix(timeoutValue, "s") {
+		var seconds int
+		if _, err := fmt.Sscanf(timeoutValue, "%ds", &seconds); err == nil && seconds > 0 {
+			return seconds
+		}
+	}
+	return probe.DefaultTimeoutSec * 2
 }
 
 func profileForManager(manager string) scanProfile {

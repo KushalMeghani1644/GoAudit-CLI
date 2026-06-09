@@ -23,7 +23,7 @@ var suspiciousScriptPatterns = []struct {
 	{"STAGED_DOWNLOADER", regexp.MustCompile(`(?i)(curl|wget)[^|;\n]*(\||;).*?(sh|bash)`), report.SeverityCritical, 90},
 	{"SCRIPT_OBFUSCATION", regexp.MustCompile(`(?i)(base64\s+-d|eval\s+\$?\(|python\s+-c\s+["'].*exec\()`), report.SeverityWarning, 80},
 	{"PERSISTENCE_WRITE", regexp.MustCompile(`(?i)(/etc/cron|crontab|\.bashrc|\.zshrc|/etc/profile|authorized_keys)`), report.SeverityCritical, 90},
-	{"CREDENTIAL_READ", regexp.MustCompile(`(?i)(\.aws/credentials|id_rsa|\.kube/config|\.env)`), report.SeverityCritical, 85},
+	{"CREDENTIAL_READ", regexp.MustCompile(`(?i)(\.aws/credentials|id_rsa|\.kube/config|\.env|\.git-credentials|\.npmrc)`), report.SeverityCritical, 85},
 	{"REVERSE_SHELL", regexp.MustCompile(`(?i)(/dev/tcp/|nc\s+-e|bash\s+-i)`), report.SeverityCritical, 95},
 }
 

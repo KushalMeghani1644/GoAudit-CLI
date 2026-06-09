@@ -112,20 +112,55 @@ func (s *Sandbox) InspectImageDigest(ctx context.Context, imageRef string) (stri
 	return "", fmt.Errorf("image digest unavailable for %s", imageRef)
 }
 
-func (s *Sandbox) RunCommand(ctx context.Context, targetCmd, profileName, image string, requiredTools, setupCommands []string) (io.Reader, error) {
-	return s.run(ctx, targetCmd, profileName, image, requiredTools, setupCommands, "")
+func (s *Sandbox) RunCommand(ctx context.Context, targetCmd, probeScript, profileName, image string, requiredTools, setupCommands []string, targetTimeoutValue, probeTimeoutValue string) (io.Reader, error) {
+	return s.run(ctx, targetCmd, probeScript, profileName, image, requiredTools, setupCommands, "", targetTimeoutValue, probeTimeoutValue)
 }
 
-func (s *Sandbox) RunProjectCommand(ctx context.Context, targetCmd, projectPath, profileName, image string, requiredTools, setupCommands []string) (io.Reader, error) {
-	return s.run(ctx, targetCmd, profileName, image, requiredTools, setupCommands, projectPath)
+func (s *Sandbox) RunProjectCommand(ctx context.Context, targetCmd, probeScript, projectPath, profileName, image string, requiredTools, setupCommands []string, targetTimeoutValue, probeTimeoutValue string) (io.Reader, error) {
+	return s.run(ctx, targetCmd, probeScript, profileName, image, requiredTools, setupCommands, projectPath, targetTimeoutValue, probeTimeoutValue)
 }
 
 // StraceTraceSet is the full set of syscalls traced by GoAudit.
-const StraceTraceSet = "open,openat,openat2,connect,execve,chmod,fchmod,fchmodat,rename,unlink,unlinkat,setuid,setgid,setreuid,setregid,socket,bind,listen,symlink,symlinkat,memfd_create,ptrace"
+const StraceTraceSet = "open,openat,openat2,connect,execve,chmod,fchmod,fchmodat,rename,unlink,unlinkat,setuid,setgid,setreuid,setregid,socket,bind,listen,symlink,symlinkat,memfd_create,ptrace,sendto,sendmsg,write"
 
-const targetTimeout = "90s"
+const targetTimeout = "180s"
+const defaultProbeTimeout = "30s"
 
-func (s *Sandbox) run(ctx context.Context, targetCmd, profileName, image string, requiredTools, setupCommands []string, projectPath string) (io.Reader, error) {
+func normalizeTimeout(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func tracedPhaseScript(phase, command, timeoutValue string) string {
+	varName := "GOAUDIT_TARGET_RC"
+	marker := "GOAUDIT_TARGET_EXIT"
+	if phase == "probe" {
+		varName = "GOAUDIT_PROBE_RC"
+		marker = "GOAUDIT_PROBE_EXIT"
+	}
+	traceFile := fmt.Sprintf("/tmp/goaudit-%s.strace", phase)
+	return fmt.Sprintf(`echo "GOAUDIT_RUNTIME_META:phase=%s" >&2
+rm -f %s
+set +e
+timeout %s strace -s 256 -f -e trace=%s -o %s %s
+%s=$?
+set -e
+echo "%s:${%s}" >&2
+if [ "${%s}" -eq 124 ]; then
+  echo "GOAUDIT_RUNTIME_META:phase=%s;status=timeout" >&2
+fi
+if [ -s %s ]; then
+  cat %s >&2
+fi
+`, phase, traceFile, timeoutValue, StraceTraceSet, traceFile, command, varName, marker, varName, varName, phase, traceFile, traceFile)
+}
+
+func (s *Sandbox) run(ctx context.Context, targetCmd, probeScript, profileName, image string, requiredTools, setupCommands []string, projectPath, targetTimeoutValue, probeTimeoutValue string) (io.Reader, error) {
+	targetTimeoutValue = normalizeTimeout(targetTimeoutValue, targetTimeout)
+	probeTimeoutValue = normalizeTimeout(probeTimeoutValue, defaultProbeTimeout)
 	toolsCheck := ""
 	for _, t := range requiredTools {
 		toolsCheck += fmt.Sprintf("command -v %s >/dev/null 2>&1 || { echo \"GOAUDIT_RUNTIME_ERROR:missing_tool:%s\" >&2; exit 97; }\n", t, t)
@@ -135,9 +170,9 @@ func (s *Sandbox) run(ctx context.Context, targetCmd, profileName, image string,
 		setupScript += c + "\n"
 	}
 
-	projectStage := "mkdir -p /workspace\ncd /workspace\n"
+	projectStage := workspaceHoneypotScript() + "mkdir -p /workspace\ncd /workspace\n"
 	if projectPath != "" {
-		projectStage = `
+		projectStage = workspaceHoneypotScript() + `
 if [ ! -d /project-ro ]; then
   echo "GOAUDIT_RUNTIME_ERROR:project_mount_missing" >&2; exit 98
 fi
@@ -145,7 +180,7 @@ command -v rsync >/dev/null 2>&1 || { echo "GOAUDIT_RUNTIME_ERROR:missing_tool:r
 mkdir -p /workspace
 rsync -a --exclude node_modules --exclude .git /project-ro/ /workspace/ || { echo "GOAUDIT_RUNTIME_ERROR:project_copy_failed" >&2; exit 98; }
 cd /workspace
-`
+` + workspaceDotEnvScript()
 	}
 
 	// User setup: detect existing uid 1000 (e.g. "node" in node images) or create sandbox user.
@@ -154,8 +189,7 @@ cd /workspace
 	if s.runAsRoot {
 		userSetup = `SANDBOX_HOME="/root"
 `
-		execLine = fmt.Sprintf(
-			`timeout %s strace -s 256 -f -e trace=%s -o /dev/stderr bash /tmp/target.sh`, targetTimeout, StraceTraceSet)
+		execLine = tracedPhaseScript("target", `bash /tmp/target.sh`, targetTimeoutValue)
 	} else {
 		userSetup = `SANDBOX_USER=$(getent passwd 1000 2>/dev/null | cut -d: -f1)
 if [ -z "$SANDBOX_USER" ]; then
@@ -164,9 +198,22 @@ if [ -z "$SANDBOX_USER" ]; then
 fi
 SANDBOX_HOME=$(eval echo "~${SANDBOX_USER}")
 `
-		execLine = fmt.Sprintf(
-			`chown -R 1000:1000 /workspace 2>/dev/null || true
-timeout %s strace -s 256 -f -e trace=%s -o /dev/stderr su "$SANDBOX_USER" -s /bin/bash -c 'cd /workspace && bash /tmp/target.sh'`, targetTimeout, StraceTraceSet)
+		execLine = `chown -R 1000:1000 /workspace 2>/dev/null || true
+` + tracedPhaseScript("target", `runuser -u "$SANDBOX_USER" -- bash -lc 'cd /workspace && bash /tmp/target.sh'`, targetTimeoutValue)
+	}
+
+	probeLine := ""
+	if strings.TrimSpace(probeScript) != "" {
+		catProbe := fmt.Sprintf(`cat << 'EOF_PROBE_CMD' > /tmp/probe.sh
+%s
+EOF_PROBE_CMD
+chmod +x /tmp/probe.sh
+`, probeScript)
+		if s.runAsRoot {
+			probeLine = catProbe + tracedPhaseScript("probe", `bash /tmp/probe.sh`, probeTimeoutValue)
+		} else {
+			probeLine = catProbe + tracedPhaseScript("probe", `runuser -u "$SANDBOX_USER" -- bash -lc 'cd /workspace && bash /tmp/probe.sh'`, probeTimeoutValue)
+		}
 	}
 
 	script := fmt.Sprintf(`set -euo pipefail
@@ -190,21 +237,17 @@ done
 %s
 %s
 cat << 'EOF_TARGET_CMD' > /tmp/target.sh
-echo 'GOAUDIT_RUNTIME_META:phase=target' >&2
 %s
 EOF_TARGET_CMD
 chmod +x /tmp/target.sh
 
-set +e
 %s
-target_rc=$?
-set -e
-echo "GOAUDIT_TARGET_EXIT:${target_rc}" >&2
-if [ "${target_rc}" -ne 0 ]; then
+%s
+if [ "${GOAUDIT_TARGET_RC:-0}" -ne 0 ]; then
   exit 99
 fi
 	`, prepScriptForRuntime(s.runtime), setupScript, toolsCheck, profileName, image,
-		userSetup, honeypotScript(), projectStage, targetCmd, execLine)
+		userSetup, honeypotScript(), projectStage, targetCmd, execLine, probeLine)
 
 	pidsLimit := int64(256)
 	hostConfig := &container.HostConfig{
@@ -371,10 +414,12 @@ echo "GOAUDIT_WARM_READY" >&2
 
 // ExecScan runs a scan command on an already-prepared (warm) container.
 // The container should have been created by PrepareWarm and be in a stopped state.
-func (s *Sandbox) ExecScan(ctx context.Context, targetCmd, profileName, img string, projectPath string) (io.Reader, error) {
+func (s *Sandbox) ExecScan(ctx context.Context, targetCmd, probeScript, profileName, img string, projectPath string, targetTimeoutValue, probeTimeoutValue string) (io.Reader, error) {
 	if projectPath != "" {
 		return nil, fmt.Errorf("cached project scans are not supported")
 	}
+	targetTimeoutValue = normalizeTimeout(targetTimeoutValue, targetTimeout)
+	probeTimeoutValue = normalizeTimeout(probeTimeoutValue, defaultProbeTimeout)
 
 	// Ensure the container is running.
 	inspect, err := s.cli.ContainerInspect(ctx, s.containerID)
@@ -389,13 +434,25 @@ func (s *Sandbox) ExecScan(ctx context.Context, targetCmd, profileName, img stri
 
 	execLine := ""
 	if s.runAsRoot {
-		execLine = fmt.Sprintf(
-			`timeout %s strace -s 256 -f -e trace=%s -o /dev/stderr bash /tmp/target.sh`, targetTimeout, StraceTraceSet)
+		execLine = tracedPhaseScript("target", `bash /tmp/target.sh`, targetTimeoutValue)
 	} else {
-		execLine = fmt.Sprintf(
-			`SANDBOX_USER=$(getent passwd 1000 2>/dev/null | cut -d: -f1 || echo sandbox)
+		execLine = `SANDBOX_USER=$(getent passwd 1000 2>/dev/null | cut -d: -f1 || echo sandbox)
 chown -R 1000:1000 /workspace 2>/dev/null || true
-timeout %s strace -s 256 -f -e trace=%s -o /dev/stderr su "$SANDBOX_USER" -s /bin/bash -c 'cd /workspace && bash /tmp/target.sh'`, targetTimeout, StraceTraceSet)
+` + tracedPhaseScript("target", `runuser -u "$SANDBOX_USER" -- bash -lc 'cd /workspace && bash /tmp/target.sh'`, targetTimeoutValue)
+	}
+
+	probeLine := ""
+	if strings.TrimSpace(probeScript) != "" {
+		catProbe := fmt.Sprintf(`cat << 'EOF_PROBE_CMD' > /tmp/probe.sh
+%s
+EOF_PROBE_CMD
+chmod +x /tmp/probe.sh
+`, probeScript)
+		if s.runAsRoot {
+			probeLine = catProbe + tracedPhaseScript("probe", `bash /tmp/probe.sh`, probeTimeoutValue)
+		} else {
+			probeLine = catProbe + tracedPhaseScript("probe", `runuser -u "$SANDBOX_USER" -- bash -lc 'cd /workspace && bash /tmp/probe.sh'`, probeTimeoutValue)
+		}
 	}
 
 	scanScript := fmt.Sprintf(`set -euo pipefail
@@ -414,20 +471,16 @@ done
 rm -rf /workspace/* /workspace/.[!.]* /workspace/..?* 2>/dev/null || true
 cd /workspace
 cat << 'EOF_TARGET_CMD' > /tmp/target.sh
-echo 'GOAUDIT_RUNTIME_META:phase=target' >&2
 %s
 EOF_TARGET_CMD
 chmod +x /tmp/target.sh
 
-set +e
 %s
-target_rc=$?
-set -e
-echo "GOAUDIT_TARGET_EXIT:${target_rc}" >&2
-if [ "${target_rc}" -ne 0 ]; then
+%s
+if [ "${GOAUDIT_TARGET_RC:-0}" -ne 0 ]; then
   exit 99
 fi
-`, profileName, img, targetCmd, execLine)
+`, profileName, img, targetCmd, execLine, probeLine)
 
 	execCfg := container.ExecOptions{
 		AttachStderr: true,
@@ -519,8 +572,22 @@ users:
 HONEYPOT_KUBE
 echo 'DATABASE_URL=postgres://admin:s3cret@db.example.com:5432/prod' > "${SANDBOX_HOME}/.env"
 echo 'API_SECRET=sk_live_goaudit_honeypot_4f8a2b1c9d3e' >> "${SANDBOX_HOME}/.env"
+echo 'https://token:ghp_goaudit_honeypot@github.com' > "${SANDBOX_HOME}/.git-credentials"
+chmod 600 "${SANDBOX_HOME}/.git-credentials" 2>/dev/null || true
+echo '//registry.npmjs.org/:_authToken=npm_goaudit_honeypot_token' > "${SANDBOX_HOME}/.npmrc"
 if [ -n "$SANDBOX_USER" ] && [ "$SANDBOX_USER" != "root" ]; then
   chown -R 1000:1000 "${SANDBOX_HOME}" 2>/dev/null || true
 fi
+`
+}
+
+func workspaceHoneypotScript() string {
+	return workspaceDotEnvScript()
+}
+
+func workspaceDotEnvScript() string {
+	return `mkdir -p /workspace 2>/dev/null || true
+echo 'DATABASE_URL=postgres://admin:s3cret@db.example.com:5432/prod' > /workspace/.env
+echo 'API_SECRET=sk_live_goaudit_honeypot_workspace' >> /workspace/.env
 `
 }

@@ -195,12 +195,14 @@ func isHardMalicious(f Finding) bool {
 		f.ReasonCode == "PRIVILEGE_ESCALATION" ||
 		f.ReasonCode == "FILELESS_EXEC" ||
 		f.ReasonCode == "PROCESS_INJECTION" ||
-		f.ReasonCode == "ENV_THEFT"
+		f.ReasonCode == "ENV_THEFT" ||
+		f.ReasonCode == "DATA_EXFIL" ||
+		f.ReasonCode == "CLOUD_METADATA_ACCESS"
 }
 
 func reasonWeight(reasonCode string) int {
 	switch reasonCode {
-	case "CREDENTIAL_READ", "PERSISTENCE_WRITE", "PRIVILEGE_ESCALATION", "ENV_THEFT":
+	case "CREDENTIAL_READ", "PERSISTENCE_WRITE", "PRIVILEGE_ESCALATION", "ENV_THEFT", "DATA_EXFIL":
 		return 80
 	case "STAGED_DOWNLOADER", "SUSPICIOUS_EXEC", "SCRIPT_OBFUSCATION":
 		return 55
@@ -226,10 +228,16 @@ func reasonWeight(reasonCode string) int {
 	// External network — expected during package installs. Low individual weight.
 	case "EXTERNAL_NETWORK":
 		return 25
+	case "INTERNAL_NETWORK":
+		return 20
+	case "CLOUD_METADATA_ACCESS":
+		return 80
 	case "EXTERNAL_NETWORK_REGISTRY":
 		return 0
-	case "RUNTIME_MISSING_TOOL", "RUNTIME_PREP_FAILURE":
+	case "RUNTIME_MISSING_TOOL", "RUNTIME_PREP_FAILURE", "RUNTIME_TRACE_UNAVAILABLE":
 		return 60
+	case "RUNSC_TRACE_FALLBACK_RUNC":
+		return 0
 	case "TARGET_COMMAND_NOT_FOUND", "TARGET_COMMAND_FAILED", "TARGET_COMMAND_TIMEOUT":
 		return 60
 	case "POLICY_BLOCKED_DOMAIN":
@@ -272,6 +280,16 @@ func Evaluate(findings []Finding, opts EvaluationOptions) (Verdict, int) {
 	score := 0
 	malicious := false
 	inconclusive := false
+	hasRunscFallback := false
+	hasRuncTraceUnavailable := false
+	for _, f := range findings {
+		if f.ReasonCode == "RUNSC_TRACE_FALLBACK_RUNC" {
+			hasRunscFallback = true
+		}
+		if f.ReasonCode == "RUNTIME_TRACE_UNAVAILABLE" && strings.Contains(strings.ToLower(f.Evidence), "runc runtime trace") {
+			hasRuncTraceUnavailable = true
+		}
+	}
 	seenReasonWeight := map[string]int{}
 	for _, f := range findings {
 		if isHardMalicious(f) || f.Severity == SeverityCritical {
@@ -283,6 +301,11 @@ func Evaluate(findings []Finding, opts EvaluationOptions) (Verdict, int) {
 			f.ReasonCode == "TARGET_COMMAND_FAILED" ||
 			f.ReasonCode == "TARGET_COMMAND_TIMEOUT" {
 			inconclusive = true
+		}
+		if f.ReasonCode == "RUNTIME_TRACE_UNAVAILABLE" {
+			if !hasRunscFallback || hasRuncTraceUnavailable || strings.Contains(strings.ToLower(f.Evidence), "runc runtime trace") {
+				inconclusive = true
+			}
 		}
 		if opts.SuppressExpectedBehavior && isExpectedBehaviorReason(f.ReasonCode) {
 			continue
