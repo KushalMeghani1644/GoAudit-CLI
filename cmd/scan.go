@@ -44,21 +44,12 @@ var scanCmd = &cobra.Command{
 		profile := inferProfile(targetCmd)
 		reporter := report.NewReporter(ciMode, verbose)
 
-		runtimeTargetCmd := targetCmd
 		var probePackages []string
 		if !skipProbe {
 			probePackages = analyzer.ExtractPackageNamesFromCommand(targetCmd)
 		}
 
-		projectPath := ""
-		if analyzer.HasLocalPackageInstall(targetCmd) {
-			if rewritten, path, ok := analyzer.RewriteSingleLocalPackageInstall(targetCmd); ok {
-				runtimeTargetCmd = rewritten
-				projectPath = path
-			} else if wd, err := os.Getwd(); err == nil {
-				projectPath = wd
-			}
-		}
+		runtimeTargetCmd, projectPath, localFindings := prepareLocalPackageInstall(targetCmd)
 
 		if warmCache {
 			warmSandboxCache(context.Background(), profile, reporter, pipelineOptions{
@@ -74,6 +65,7 @@ var scanCmd = &cobra.Command{
 		runScanPipeline(context.Background(), targetCmd, profile, reporter, pipelineOptions{
 			projectPath:    projectPath,
 			runtimeCommand: runtimeTargetCmd,
+			priorFindings:  localFindings,
 			runAsRoot:      runAsRoot,
 			probePackages:  probePackages,
 			skipProbe:      skipProbe,
@@ -81,6 +73,31 @@ var scanCmd = &cobra.Command{
 			probeTimeout:   probeTimeout,
 		})
 	},
+}
+
+func prepareLocalPackageInstall(targetCmd string) (string, string, []report.Finding) {
+	if !analyzer.HasLocalPackageInstall(targetCmd) {
+		return targetCmd, "", nil
+	}
+	if rewritten, path, ok := analyzer.RewriteSingleLocalPackageInstall(targetCmd); ok {
+		return rewritten, path, nil
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return targetCmd, "", []report.Finding{localPackageRewriteUnavailableFinding(targetCmd, err.Error())}
+	}
+	return targetCmd, wd, []report.Finding{localPackageRewriteUnavailableFinding(targetCmd, "local package install contains multiple or unsupported local path specs; mounted the current working directory without rewriting the command")}
+}
+
+func localPackageRewriteUnavailableFinding(targetCmd, evidence string) report.Finding {
+	return report.Finding{
+		Severity:   report.SeverityWarning,
+		Type:       "runtime",
+		ReasonCode: "LOCAL_PACKAGE_REWRITE_UNAVAILABLE",
+		Path:       targetCmd,
+		Confidence: 70,
+		Evidence:   evidence,
+	}
 }
 
 func inferProfile(cmd string) scanProfile {

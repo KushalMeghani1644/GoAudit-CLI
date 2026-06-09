@@ -435,7 +435,7 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 	defer cache.Close()
 
 	s, err := sandbox.NewSandbox(ctx, profile.Image, sandbox.SandboxOptions{
-		NetworkEnabled: true,
+		NetworkEnabled: networkEnabled,
 		RunAsRoot:      opts.runAsRoot,
 	})
 	if err != nil {
