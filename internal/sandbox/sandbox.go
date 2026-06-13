@@ -121,7 +121,7 @@ func (s *Sandbox) RunProjectCommand(ctx context.Context, targetCmd, probeScript,
 }
 
 // StraceTraceSet is the full set of syscalls traced by GoAudit.
-const StraceTraceSet = "open,openat,openat2,connect,execve,chmod,fchmod,fchmodat,rename,unlink,unlinkat,setuid,setgid,setreuid,setregid,socket,bind,listen,symlink,symlinkat,memfd_create,ptrace,sendto,sendmsg,write"
+const StraceTraceSet = "open,openat,openat2,connect,execve,chmod,fchmod,fchmodat,rename,unlink,unlinkat,setuid,setgid,setreuid,setregid,socket,bind,listen,symlink,symlinkat,memfd_create,ptrace,sendto,sendmsg"
 
 const targetTimeout = "180s"
 const defaultProbeTimeout = "30s"
@@ -432,12 +432,20 @@ func (s *Sandbox) ExecScan(ctx context.Context, targetCmd, probeScript, profileN
 		}
 	}
 
+	// Re-apply honeypots in case a previous scan deleted them.
+	userSetup := ""
+	if s.runAsRoot {
+		userSetup = `SANDBOX_HOME="/root"` + "\n"
+	} else {
+		userSetup = `SANDBOX_USER=$(getent passwd 1000 2>/dev/null | cut -d: -f1 || echo sandbox)
+SANDBOX_HOME=$(eval echo "~${SANDBOX_USER}")` + "\n"
+	}
+
 	execLine := ""
 	if s.runAsRoot {
 		execLine = tracedPhaseScript("target", `bash /tmp/target.sh`, targetTimeoutValue)
 	} else {
-		execLine = `SANDBOX_USER=$(getent passwd 1000 2>/dev/null | cut -d: -f1 || echo sandbox)
-chown -R 1000:1000 /workspace 2>/dev/null || true
+		execLine = `chown -R 1000:1000 /workspace 2>/dev/null || true
 ` + tracedPhaseScript("target", `runuser -u "$SANDBOX_USER" -- bash -lc 'cd /workspace && bash /tmp/target.sh'`, targetTimeoutValue)
 	}
 
@@ -468,7 +476,12 @@ for tool in node npm pnpm bun bash curl strace; do
   fi
 done
 
+%s
+%s
+
 rm -rf /workspace/* /workspace/.[!.]* /workspace/..?* 2>/dev/null || true
+mkdir -p /workspace
+%s
 cd /workspace
 cat << 'EOF_TARGET_CMD' > /tmp/target.sh
 %s
@@ -480,7 +493,7 @@ chmod +x /tmp/target.sh
 if [ "${GOAUDIT_TARGET_RC:-0}" -ne 0 ]; then
   exit 99
 fi
-`, profileName, img, targetCmd, execLine, probeLine)
+`, profileName, img, userSetup, honeypotScript(), workspaceHoneypotScript(), targetCmd, execLine, probeLine)
 
 	execCfg := container.ExecOptions{
 		AttachStderr: true,

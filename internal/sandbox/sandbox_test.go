@@ -46,7 +46,7 @@ func TestStraceTraceSetContainsExpectedSyscalls(t *testing.T) {
 		"open", "openat", "connect", "execve",
 		"chmod", "setuid", "setgid",
 		"symlink", "symlinkat", "memfd_create", "ptrace",
-		"socket", "bind", "listen", "sendto", "sendmsg", "write",
+		"socket", "bind", "listen", "sendto", "sendmsg",
 	}
 	for _, syscall := range expected {
 		if !strings.Contains(StraceTraceSet, syscall) {

@@ -24,7 +24,7 @@ func HasPrepFailure(findings []report.Finding) bool {
 
 var (
 	fsRegex   = regexp.MustCompile(`(?i)(?:open|openat|openat2).*?\"(.*?)\",\s*(?:\{[^}]*flags=)?([A-Z_\|]+)`)
-	netRegex  = regexp.MustCompile(`connect\(.*sa_family=(?:AF_INET|AF_INET6).*?sin_port=htons\((\d+)\).*?(?:inet_addr\("(.*?)"\)|inet_pton\([^,]+,\s*"(.*?)")`)
+	netRegex  = regexp.MustCompile(`connect\(.*sa_family=(?:AF_INET|AF_INET6).*?sin6?_port=htons\((\d+)\).*?(?:inet_addr\("(.*?)"\)|inet_pton\([^,]+,\s*"(.*?)")`)
 	execRegex = regexp.MustCompile(`(?i)execve\(\"(.*?)\",\s*\[(.*?)\]`)
 	mutRegex  = regexp.MustCompile(`(?i)(?:chmod|fchmod|fchmodat|rename|unlink|unlinkat)\(\"?(.*?)\"?[,)]`)
 	privRegex = regexp.MustCompile(`(?i)(setuid|setgid|setreuid|setregid)\(([^)]*)\)`)
@@ -39,7 +39,7 @@ var (
 	memfdRegex        = regexp.MustCompile(`(?i)memfd_create\("(.*?)"`)
 	ptraceAttachRegex = regexp.MustCompile(`(?i)ptrace\(PTRACE_(?:ATTACH|SEIZE)`)
 	bindListenRegex   = regexp.MustCompile(`(?:bind|listen)\(\d+,\s*\{sa_family=AF_INET6?,\s*sin6?_port=htons\((\d+)\)`)
-	sendRegex         = regexp.MustCompile(`(?i)(?:sendto|sendmsg|write)\(\d+`)
+	sendRegex         = regexp.MustCompile(`(?i)(?:sendto|sendmsg)\(\d+`)
 
 	// Environment variable theft — reading /proc/self/environ
 	procEnvironRegex = regexp.MustCompile(`(?i)open(?:at)?\(.*?"/proc/self/environ"`)
@@ -178,6 +178,10 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 
 		// --- File Access ---
 		if fsMatches := fsRegex.FindStringSubmatch(line); len(fsMatches) > 2 {
+			// Skip failed syscalls — they didn't actually read/write anything.
+			if strings.Contains(line, "= -1 ") {
+				continue
+			}
 			path := fsMatches[1]
 			flags := fsMatches[2]
 			isWrite := strings.Contains(flags, "O_WRONLY") || strings.Contains(flags, "O_RDWR") || strings.Contains(flags, "O_CREAT")
@@ -210,6 +214,10 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 
 		// --- Exec ---
 		if execMatches := execRegex.FindStringSubmatch(line); len(execMatches) > 2 {
+			// Skip failed syscalls.
+			if strings.Contains(line, "= -1 ") {
+				continue
+			}
 			bin := execMatches[1]
 			args := execMatches[2]
 			argsLower := strings.ToLower(args)
@@ -243,6 +251,10 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 
 		// --- Mutation ---
 		if mutMatches := mutRegex.FindStringSubmatch(line); len(mutMatches) > 1 {
+			// Skip failed syscalls.
+			if strings.Contains(line, "= -1 ") {
+				continue
+			}
 			path := mutMatches[1]
 			if path != "" && writeCriticalPaths.MatchString(path) {
 				key := "PERSISTENCE_WRITE:" + path + ":" + phaseTag(probePhase, targetPhase)

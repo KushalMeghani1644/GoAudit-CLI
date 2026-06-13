@@ -358,3 +358,52 @@ func TestDetectsSendAfterSuspiciousConnect(t *testing.T) {
 		t.Fatal("expected DATA_EXFIL for sendto after suspicious connect")
 	}
 }
+
+func TestDetectsIPv6ExternalNetwork(t *testing.T) {
+	f := findByReason(parse(t,
+		`connect(3, {sa_family=AF_INET6, sin6_port=htons(443), sin6_flowinfo=htonl(0), inet_pton(AF_INET6, "2606:4700::6810:1723"), sin6_scope_id=0}, 28) = 0`),
+		"EXTERNAL_NETWORK")
+	if f == nil {
+		t.Fatal("expected EXTERNAL_NETWORK for IPv6 connection with sin6_port")
+	}
+}
+
+func TestFailedOpenatNotFlagged(t *testing.T) {
+	findings := parse(t,
+		`openat(AT_FDCWD, "/root/.ssh/id_ed25519", O_RDONLY) = -1 ENOENT (No such file or directory)`)
+	for _, f := range findings {
+		if f.ReasonCode == "CREDENTIAL_READ" {
+			t.Fatal("should not flag failed openat (ENOENT) as CREDENTIAL_READ")
+		}
+	}
+}
+
+func TestFailedExecveNotFlagged(t *testing.T) {
+	findings := parse(t,
+		`execve("/tmp/payload", ["/tmp/payload"]) = -1 ENOENT (No such file or directory)`)
+	for _, f := range findings {
+		if f.ReasonCode == "SUSPICIOUS_EXEC" {
+			t.Fatal("should not flag failed execve (ENOENT) as SUSPICIOUS_EXEC")
+		}
+	}
+}
+
+func TestFailedChmodNotFlagged(t *testing.T) {
+	findings := parse(t,
+		`chmod("/usr/local/bin/evil", 0755) = -1 ENOENT (No such file or directory)`)
+	for _, f := range findings {
+		if f.ReasonCode == "PERSISTENCE_WRITE" {
+			t.Fatal("should not flag failed chmod (ENOENT) as PERSISTENCE_WRITE")
+		}
+	}
+}
+
+func TestSuccessfulOpenatStillFlagged(t *testing.T) {
+	// Ensure the failed-syscall filter doesn't suppress successful reads.
+	f := findByReason(parse(t,
+		`openat(AT_FDCWD, "/root/.ssh/id_ed25519", O_RDONLY) = 3`),
+		"CREDENTIAL_READ")
+	if f == nil {
+		t.Fatal("expected CREDENTIAL_READ for successful openat of .ssh/id_ed25519")
+	}
+}
