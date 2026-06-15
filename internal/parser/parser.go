@@ -63,20 +63,32 @@ func ParseStream(r io.Reader, reporter *report.Reporter, opts ParseOptions) ([]r
 type TraceHealth struct {
 	TargetPhaseObserved   bool
 	TargetExitObserved    bool
+	TargetExitCode        int
 	TargetSyscallObserved bool
 	ProbeExpected         bool
 	ProbePhaseObserved    bool
+	ProbeExitObserved     bool
+	ProbeExitCode         int
 	ProbeSyscallObserved  bool
 }
 
 func (h TraceHealth) Usable() bool {
-	if !h.TargetPhaseObserved || !h.TargetSyscallObserved {
+	if !h.TargetPhaseObserved || !h.TargetExitObserved || !h.TargetSyscallObserved {
 		return false
 	}
-	if h.ProbeExpected && !h.ProbePhaseObserved {
+	if h.ProbeExpected && (!h.ProbePhaseObserved || !h.ProbeExitObserved || !h.ProbeSyscallObserved) {
+		return false
+	}
+	if h.ProbeExpected && h.ProbeExitObserved && h.ProbeExitCode != 0 {
 		return false
 	}
 	return true
+}
+
+type observedConnection struct {
+	Host string
+	IP   string
+	Port int
 }
 
 func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOptions) ([]report.Finding, TraceHealth, error) {
@@ -88,7 +100,8 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 	health := TraceHealth{ProbeExpected: opts.ProbeExpected}
 	seen := map[string]bool{} // deduplication key
 	sawSuspiciousOutbound := false
-	lastSuspiciousHost := ""
+	lastSuspicious := observedConnection{}
+	suspiciousByFD := map[string]observedConnection{}
 
 	if opts.KnownRegistryIPs == nil {
 		opts.KnownRegistryIPs = map[string]string{}
@@ -121,6 +134,20 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 			emit(report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: "RUNTIME_PROJECT_COPY_FAILURE", Path: "project mount", Confidence: 90})
 			continue
 		}
+		if strings.Contains(line, "GOAUDIT_PROBE_IMPORT_OK:") {
+			pkg := strings.TrimSpace(line[strings.Index(line, "GOAUDIT_PROBE_IMPORT_OK:")+len("GOAUDIT_PROBE_IMPORT_OK:"):])
+			emit(report.Finding{Severity: report.SeverityInfo, Type: "runtime", ReasonCode: "PROBE_IMPORT_OK", Path: pkg, Confidence: 90})
+			continue
+		}
+		if strings.Contains(line, "GOAUDIT_PROBE_IMPORT_FAILED:") {
+			pkg := strings.TrimSpace(line[strings.Index(line, "GOAUDIT_PROBE_IMPORT_FAILED:")+len("GOAUDIT_PROBE_IMPORT_FAILED:"):])
+			emit(report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: "PROBE_IMPORT_FAILED", Path: pkg, Confidence: 70})
+			continue
+		}
+		if strings.Contains(line, "GOAUDIT_PROBE_TIMEOUT") {
+			emit(report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: "PROBE_COMMAND_TIMEOUT", Path: "124", Confidence: 95, Evidence: "Runtime probe timed out"})
+			continue
+		}
 		if strings.Contains(line, "GOAUDIT_RUNTIME_META:") {
 			meta := strings.TrimSpace(line[strings.Index(line, "GOAUDIT_RUNTIME_META:")+len("GOAUDIT_RUNTIME_META:"):])
 			if strings.Contains(meta, "phase=probe") {
@@ -128,32 +155,56 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 				targetPhase = true
 				health.ProbePhaseObserved = true
 				sawSuspiciousOutbound = false
-				lastSuspiciousHost = ""
+				lastSuspicious = observedConnection{}
 			}
 			if strings.Contains(meta, "phase=target") {
 				targetPhase = true
 				health.TargetPhaseObserved = true
 				sawSuspiciousOutbound = false
-				lastSuspiciousHost = ""
+				lastSuspicious = observedConnection{}
 			}
 			emit(report.Finding{Severity: report.SeverityInfo, Type: "runtime", ReasonCode: "RUNTIME_METADATA", Path: "sandbox", Confidence: 90, Evidence: meta})
 			continue
 		}
-		if strings.Contains(line, "GOAUDIT_TARGET_EXIT:") {
-			raw := strings.TrimSpace(line[strings.Index(line, "GOAUDIT_TARGET_EXIT:")+len("GOAUDIT_TARGET_EXIT:"):])
+		if strings.Contains(line, "GOAUDIT_TARGET_EXIT:") || strings.Contains(line, "GOAUDIT_PROBE_EXIT:") {
+			isProbeExit := strings.Contains(line, "GOAUDIT_PROBE_EXIT:")
+			marker := "GOAUDIT_TARGET_EXIT:"
+			if isProbeExit {
+				marker = "GOAUDIT_PROBE_EXIT:"
+			}
+			raw := strings.TrimSpace(line[strings.Index(line, marker)+len(marker):])
 			code, err := strconv.Atoi(raw)
 			if err != nil {
 				continue
 			}
-			health.TargetExitObserved = true
+			if isProbeExit {
+				health.ProbeExitObserved = true
+				health.ProbeExitCode = code
+			} else {
+				health.TargetExitObserved = true
+				health.TargetExitCode = code
+			}
 			if code != 0 {
 				rc := "TARGET_COMMAND_FAILED"
-				if code == 127 {
-					rc = "TARGET_COMMAND_NOT_FOUND"
-				} else if code == 124 {
-					rc = "TARGET_COMMAND_TIMEOUT"
+				evidence := "Target command returned non-zero exit status in sandbox"
+				if isProbeExit {
+					rc = "PROBE_COMMAND_FAILED"
+					evidence = "Runtime probe returned non-zero exit status in sandbox"
 				}
-				emit(report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: rc, Path: strconv.Itoa(code), Confidence: 95, Evidence: "Target command returned non-zero exit status in sandbox"})
+				if code == 127 {
+					if isProbeExit {
+						rc = "PROBE_COMMAND_NOT_FOUND"
+					} else {
+						rc = "TARGET_COMMAND_NOT_FOUND"
+					}
+				} else if code == 124 {
+					if isProbeExit {
+						rc = "PROBE_COMMAND_TIMEOUT"
+					} else {
+						rc = "TARGET_COMMAND_TIMEOUT"
+					}
+				}
+				emit(report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: rc, Path: strconv.Itoa(code), Confidence: 95, Evidence: evidence})
 			}
 			continue
 		}
@@ -177,16 +228,14 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 		}
 
 		// --- File Access ---
-		if fsMatches := fsRegex.FindStringSubmatch(line); len(fsMatches) > 2 {
-			// Skip failed syscalls — they didn't actually read/write anything.
-			if strings.Contains(line, "= -1 ") {
-				continue
-			}
-			path := fsMatches[1]
-			flags := fsMatches[2]
+		if path, flags, ok := parseOpenPathFlags(line); ok {
+			failed := strings.Contains(line, "= -1 ")
 			isWrite := strings.Contains(flags, "O_WRONLY") || strings.Contains(flags, "O_RDWR") || strings.Contains(flags, "O_CREAT")
 
 			if !isWrite {
+				if failed {
+					continue
+				}
 				if readCriticalPaths.MatchString(path) {
 					key := "CREDENTIAL_READ:" + path + ":" + phaseTag(probePhase, targetPhase)
 					if !seen[key] {
@@ -199,9 +248,15 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 					key := "PERSISTENCE_WRITE:" + path + ":" + phaseTag(probePhase, targetPhase)
 					if !seen[key] {
 						seen[key] = true
-						emit(report.Finding{Severity: report.SeverityCritical, Type: "fs_write", ReasonCode: "PERSISTENCE_WRITE", Path: path, Confidence: 95})
+						confidence := 95
+						evidence := ""
+						if failed {
+							confidence = 85
+							evidence = "Attempted write to sensitive persistence path failed in sandbox"
+						}
+						emit(report.Finding{Severity: report.SeverityCritical, Type: "fs_write", ReasonCode: "PERSISTENCE_WRITE", Path: path, Confidence: confidence, Evidence: evidence})
 					}
-				} else if !writeAllowedPaths.MatchString(path) {
+				} else if !failed && !writeAllowedPaths.MatchString(path) {
 					key := "UNEXPECTED_WRITE:" + path + ":" + phaseTag(probePhase, targetPhase)
 					if !seen[key] {
 						seen[key] = true
@@ -327,15 +382,22 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 		}
 
 		// --- Network send after suspicious outbound connect ---
-		if sawSuspiciousOutbound && sendRegex.MatchString(line) && targetPhase {
-			key := "DATA_EXFIL_SEND:" + phaseTag(probePhase, targetPhase)
+		if sendFD, ok := parseSendFD(line); ok && targetPhase {
+			conn, matchedFD := suspiciousByFD[sendFD]
+			if !matchedFD && sawSuspiciousOutbound {
+				conn = lastSuspicious
+			}
+			if !matchedFD && !sawSuspiciousOutbound {
+				continue
+			}
+			key := "DATA_EXFIL_SEND:" + conn.IP + ":" + strconv.Itoa(conn.Port) + ":" + phaseTag(probePhase, targetPhase)
 			if !seen[key] {
 				seen[key] = true
-				host := lastSuspiciousHost
+				host := conn.Host
 				if host == "" {
 					host = "outbound"
 				}
-				emit(report.Finding{Severity: report.SeverityCritical, Type: "network", ReasonCode: "DATA_EXFIL", Path: host, Host: host, Confidence: 88, Evidence: "Observed network data send after connection to a non-registry host"})
+				emit(report.Finding{Severity: report.SeverityCritical, Type: "network", ReasonCode: "DATA_EXFIL", Path: host, Host: host, IP: conn.IP, Port: conn.Port, Confidence: 88, Evidence: "Observed network data send after connection to a non-registry host"})
 			}
 			continue
 		}
@@ -393,8 +455,12 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 					host = strings.TrimSuffix(names[0], ".")
 				}
 			}
+			fd := parseConnectFD(line)
 			if sawSuspiciousOutbound && reasonCode != "EXTERNAL_NETWORK_REGISTRY" {
-				lastSuspiciousHost = host
+				lastSuspicious = observedConnection{Host: host, IP: ipStr, Port: port}
+				if fd != "" {
+					suspiciousByFD[fd] = lastSuspicious
+				}
 			}
 
 			emit(report.Finding{Severity: severity, Type: "network", ReasonCode: reasonCode, Host: host, Port: port, IP: ipStr, Confidence: 60})
@@ -403,6 +469,77 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 
 	findings = finalizeDynamicFindings(findings)
 	return findings, health, scanner.Err()
+}
+
+func parseOpenPathFlags(line string) (string, string, bool) {
+	matches := fsRegex.FindStringSubmatch(line)
+	if len(matches) > 2 {
+		return matches[1], matches[2], true
+	}
+	if !(strings.Contains(line, "open(") || strings.Contains(line, "openat(") || strings.Contains(line, "openat2(")) {
+		return "", "", false
+	}
+	first := strings.Index(line, "\"")
+	if first < 0 {
+		return "", "", false
+	}
+	secondRel := strings.Index(line[first+1:], "\"")
+	if secondRel < 0 {
+		return "", "", false
+	}
+	second := first + 1 + secondRel
+	path := line[first+1 : second]
+	rest := line[second+1:]
+	if idx := strings.Index(rest, "{flags="); idx >= 0 {
+		rest = rest[idx+len("{flags="):]
+	} else if idx := strings.Index(rest, ","); idx >= 0 {
+		rest = rest[idx+1:]
+	}
+	rest = strings.TrimSpace(rest)
+	end := len(rest)
+	for i, r := range rest {
+		if !(r == '_' || r == '|' || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			end = i
+			break
+		}
+	}
+	flags := rest[:end]
+	if path == "" || flags == "" {
+		return "", "", false
+	}
+	return path, flags, true
+}
+
+func parseConnectFD(line string) string {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "connect(") {
+		return ""
+	}
+	rest := strings.TrimPrefix(line, "connect(")
+	idx := strings.Index(rest, ",")
+	if idx < 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:idx])
+}
+
+func parseSendFD(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	prefix := ""
+	if strings.HasPrefix(line, "sendto(") {
+		prefix = "sendto("
+	} else if strings.HasPrefix(line, "sendmsg(") {
+		prefix = "sendmsg("
+	} else {
+		return "", false
+	}
+	rest := strings.TrimPrefix(line, prefix)
+	idx := strings.Index(rest, ",")
+	if idx < 0 {
+		return "", false
+	}
+	fd := strings.TrimSpace(rest[:idx])
+	return fd, fd != ""
 }
 
 func phaseTag(probePhase, targetPhase bool) string {

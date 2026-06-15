@@ -98,6 +98,18 @@ func TestDetectsPersistenceWriteCron(t *testing.T) {
 	}
 }
 
+func TestDetectsAttemptedPersistenceWriteUsrLocalBin(t *testing.T) {
+	f := findByReason(parse(t,
+		`openat(AT_FDCWD, "/usr/local/bin/node-update", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0666) = -1 EACCES (Permission denied)`),
+		"PERSISTENCE_WRITE")
+	if f == nil {
+		t.Fatal("expected PERSISTENCE_WRITE for attempted /usr/local/bin write")
+	}
+	if f.Confidence >= 95 {
+		t.Fatalf("expected lower confidence for failed attempt, got %d", f.Confidence)
+	}
+}
+
 func TestDetectsPersistenceCrontabExec(t *testing.T) {
 	f := findByReason(parse(t,
 		`execve("/usr/bin/crontab", ["crontab", "/tmp/.goaudit-cron"], 0x7ffd3f) = 0`),
@@ -217,6 +229,19 @@ func TestDetectsExternalNetwork(t *testing.T) {
 		"EXTERNAL_NETWORK")
 	if f == nil {
 		t.Fatal("expected EXTERNAL_NETWORK")
+	}
+}
+
+func TestDetectsDataExfilWithConnectionMetadata(t *testing.T) {
+	findings := parse(t, "GOAUDIT_RUNTIME_META:phase=target\n"+
+		`connect(7, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr("45.33.32.156")}, 16) = 0`+"\n"+
+		`sendto(7, "secret", 6, MSG_NOSIGNAL, NULL, 0) = 6`+"\n")
+	f := findByReason(findings, "DATA_EXFIL")
+	if f == nil {
+		t.Fatal("expected DATA_EXFIL after send on suspicious fd")
+	}
+	if f.IP != "45.33.32.156" || f.Port != 80 {
+		t.Fatalf("expected exfil IP/port to be preserved, got ip=%q port=%d", f.IP, f.Port)
 	}
 }
 

@@ -46,12 +46,27 @@ type Report struct {
 	Findings   []Finding `json:"findings"`
 }
 type ReportMeta struct {
-	Command                  string `json:"command,omitempty"`
-	ProfileName              string `json:"profileName,omitempty"`
-	PackageName              string `json:"packageName,omitempty"`
-	PackageVersion           string `json:"packageVersion,omitempty"`
-	SandboxRuntime           string `json:"sandboxRuntime,omitempty"`
-	SuppressExpectedBehavior bool   `json:"suppressExpectedBehavior,omitempty"`
+	Command                  string       `json:"command,omitempty"`
+	ProfileName              string       `json:"profileName,omitempty"`
+	PackageName              string       `json:"packageName,omitempty"`
+	PackageVersion           string       `json:"packageVersion,omitempty"`
+	SandboxRuntime           string       `json:"sandboxRuntime,omitempty"`
+	SuppressExpectedBehavior bool         `json:"suppressExpectedBehavior,omitempty"`
+	Dynamic                  *DynamicMeta `json:"dynamic,omitempty"`
+}
+
+type DynamicMeta struct {
+	Target DynamicPhaseMeta `json:"target"`
+	Probe  DynamicPhaseMeta `json:"probe"`
+}
+
+type DynamicPhaseMeta struct {
+	Expected        bool `json:"expected,omitempty"`
+	PhaseObserved   bool `json:"phaseObserved"`
+	ExitObserved    bool `json:"exitObserved"`
+	ExitCode        int  `json:"exitCode,omitempty"`
+	SyscallObserved bool `json:"syscallObserved"`
+	TimedOut        bool `json:"timedOut,omitempty"`
 }
 
 type EvaluationOptions struct {
@@ -238,7 +253,7 @@ func reasonWeight(reasonCode string) int {
 		return 60
 	case "RUNSC_TRACE_FALLBACK_RUNC":
 		return 0
-	case "TARGET_COMMAND_NOT_FOUND", "TARGET_COMMAND_FAILED", "TARGET_COMMAND_TIMEOUT":
+	case "TARGET_COMMAND_NOT_FOUND", "TARGET_COMMAND_FAILED", "TARGET_COMMAND_TIMEOUT", "PROBE_COMMAND_NOT_FOUND", "PROBE_COMMAND_FAILED", "PROBE_COMMAND_TIMEOUT":
 		return 60
 	case "POLICY_BLOCKED_DOMAIN":
 		return 20
@@ -299,7 +314,10 @@ func Evaluate(findings []Finding, opts EvaluationOptions) (Verdict, int) {
 			f.ReasonCode == "RUNTIME_PREP_FAILURE" ||
 			f.ReasonCode == "TARGET_COMMAND_NOT_FOUND" ||
 			f.ReasonCode == "TARGET_COMMAND_FAILED" ||
-			f.ReasonCode == "TARGET_COMMAND_TIMEOUT" {
+			f.ReasonCode == "TARGET_COMMAND_TIMEOUT" ||
+			f.ReasonCode == "PROBE_COMMAND_NOT_FOUND" ||
+			f.ReasonCode == "PROBE_COMMAND_FAILED" ||
+			f.ReasonCode == "PROBE_COMMAND_TIMEOUT" {
 			inconclusive = true
 		}
 		if f.ReasonCode == "RUNTIME_TRACE_UNAVAILABLE" {

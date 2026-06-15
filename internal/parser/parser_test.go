@@ -63,8 +63,8 @@ func TestParseStreamTraceHealthMissingTargetPhase(t *testing.T) {
 
 func TestParseStreamTraceHealthMissingTargetExit(t *testing.T) {
 	_, health := parseWithHealth(t, "GOAUDIT_RUNTIME_META:phase=target\ngetpid() = 42\n", ParseOptions{})
-	if !health.Usable() {
-		t.Fatalf("expected usable trace health with target phase and syscalls even without explicit target exit: %#v", health)
+	if health.Usable() {
+		t.Fatalf("expected unusable trace health without explicit target exit: %#v", health)
 	}
 }
 
@@ -80,7 +80,8 @@ func TestParseStreamProbeFindingAnnotated(t *testing.T) {
 		"getpid() = 42\n" +
 		"GOAUDIT_TARGET_EXIT:0\n" +
 		"GOAUDIT_RUNTIME_META:phase=probe\n" +
-		`openat(AT_FDCWD, "/root/.aws/credentials", O_RDONLY) = 3` + "\n"
+		`openat(AT_FDCWD, "/root/.aws/credentials", O_RDONLY) = 3` + "\n" +
+		"GOAUDIT_PROBE_EXIT:0\n"
 	findings, _ := parseWithHealth(t, logs, ParseOptions{ProbeExpected: true})
 
 	var credentialFinding *report.Finding
@@ -95,5 +96,22 @@ func TestParseStreamProbeFindingAnnotated(t *testing.T) {
 	}
 	if !strings.Contains(credentialFinding.Evidence, "[runtime probe]") {
 		t.Fatalf("expected probe annotation, got %q", credentialFinding.Evidence)
+	}
+}
+
+func TestParseStreamDetectsProbeTimeout(t *testing.T) {
+	findings, health := parseWithHealth(t, "GOAUDIT_RUNTIME_META:phase=probe\nGOAUDIT_PROBE_EXIT:124\n", ParseOptions{ProbeExpected: true})
+	if findByReason(findings, "PROBE_COMMAND_TIMEOUT") == nil {
+		t.Fatal("expected PROBE_COMMAND_TIMEOUT for probe exit 124")
+	}
+	if health.ProbeExitCode != 124 || !health.ProbeExitObserved {
+		t.Fatalf("expected probe exit health, got %#v", health)
+	}
+}
+
+func TestParseStreamTraceHealthExpectedProbeNeedsSyscallAndExit(t *testing.T) {
+	_, health := parseWithHealth(t, "GOAUDIT_RUNTIME_META:phase=target\ngetpid() = 42\nGOAUDIT_TARGET_EXIT:0\nGOAUDIT_RUNTIME_META:phase=probe\n", ParseOptions{ProbeExpected: true})
+	if health.Usable() {
+		t.Fatalf("expected unusable trace health without probe syscall and exit: %#v", health)
 	}
 }

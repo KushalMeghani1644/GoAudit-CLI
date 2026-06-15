@@ -411,6 +411,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 		ProfileName:              profile.Name,
 		SandboxRuntime:           sandboxRuntime,
 		SuppressExpectedBehavior: isNodeProfile(profile.Name),
+		Dynamic:                  dynamicMetaFromTraceHealth(traceHealth),
 	}
 	reporter.Report(findings, meta)
 }
@@ -653,7 +654,7 @@ func planRunscDynamicFallback(runtime string, dynamicFindings []report.Finding, 
 			}},
 		}, true
 	}
-	if !traceHealth.TargetPhaseObserved || !traceHealth.TargetSyscallObserved {
+	if !traceHealth.Usable() {
 		return runscDynamicFallbackPlan{
 			Reason: "trace_unavailable",
 			Warnings: []report.Finding{
@@ -686,10 +687,40 @@ func traceHealthMissingReasons(health parser.TraceHealth) []string {
 	if health.ProbeExpected && !health.ProbePhaseObserved {
 		reasons = append(reasons, "missing probe phase marker")
 	}
+	if health.ProbeExpected && !health.ProbeExitObserved {
+		reasons = append(reasons, "missing probe exit marker")
+	}
+	if health.ProbeExpected && !health.ProbeSyscallObserved {
+		reasons = append(reasons, "missing probe syscall evidence")
+	}
+	if health.ProbeExpected && health.ProbeExitObserved && health.ProbeExitCode != 0 {
+		reasons = append(reasons, fmt.Sprintf("probe exited with status %d", health.ProbeExitCode))
+	}
 	if len(reasons) == 0 {
 		reasons = append(reasons, "unknown trace health failure")
 	}
 	return reasons
+}
+
+func dynamicMetaFromTraceHealth(health parser.TraceHealth) *report.DynamicMeta {
+	return &report.DynamicMeta{
+		Target: report.DynamicPhaseMeta{
+			Expected:        true,
+			PhaseObserved:   health.TargetPhaseObserved,
+			ExitObserved:    health.TargetExitObserved,
+			ExitCode:        health.TargetExitCode,
+			SyscallObserved: health.TargetSyscallObserved,
+			TimedOut:        health.TargetExitObserved && health.TargetExitCode == 124,
+		},
+		Probe: report.DynamicPhaseMeta{
+			Expected:        health.ProbeExpected,
+			PhaseObserved:   health.ProbePhaseObserved,
+			ExitObserved:    health.ProbeExitObserved,
+			ExitCode:        health.ProbeExitCode,
+			SyscallObserved: health.ProbeSyscallObserved,
+			TimedOut:        health.ProbeExitObserved && health.ProbeExitCode == 124,
+		},
+	}
 }
 
 func isNodeProfile(name string) bool {

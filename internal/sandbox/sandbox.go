@@ -3,6 +3,8 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -158,6 +160,22 @@ fi
 `, phase, traceFile, timeoutValue, StraceTraceSet, traceFile, command, varName, marker, varName, varName, phase, traceFile, traceFile)
 }
 
+func scriptHeredoc(path, content, prefix string) string {
+	delimiter := prefix + "_EOF_" + randomToken()
+	for strings.Contains(content, delimiter) {
+		delimiter = prefix + "_EOF_" + randomToken()
+	}
+	return fmt.Sprintf("cat << '%s' > %s\n%s\n%s\nchmod +x %s\n", delimiter, path, content, delimiter, path)
+}
+
+func randomToken() string {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return hex.EncodeToString(b[:])
+	}
+	return fmt.Sprintf("%d", time.Now().UnixNano())
+}
+
 func (s *Sandbox) run(ctx context.Context, targetCmd, probeScript, profileName, image string, requiredTools, setupCommands []string, projectPath, targetTimeoutValue, probeTimeoutValue string) (io.Reader, error) {
 	targetTimeoutValue = normalizeTimeout(targetTimeoutValue, targetTimeout)
 	probeTimeoutValue = normalizeTimeout(probeTimeoutValue, defaultProbeTimeout)
@@ -204,11 +222,7 @@ SANDBOX_HOME=$(eval echo "~${SANDBOX_USER}")
 
 	probeLine := ""
 	if strings.TrimSpace(probeScript) != "" {
-		catProbe := fmt.Sprintf(`cat << 'EOF_PROBE_CMD' > /tmp/probe.sh
-%s
-EOF_PROBE_CMD
-chmod +x /tmp/probe.sh
-`, probeScript)
+		catProbe := scriptHeredoc("/tmp/probe.sh", probeScript, "GOAUDIT_PROBE")
 		if s.runAsRoot {
 			probeLine = catProbe + tracedPhaseScript("probe", `bash /tmp/probe.sh`, probeTimeoutValue)
 		} else {
@@ -236,18 +250,15 @@ done
 %s
 %s
 %s
-cat << 'EOF_TARGET_CMD' > /tmp/target.sh
-%s
-EOF_TARGET_CMD
-chmod +x /tmp/target.sh
 
-%s
-%s
-if [ "${GOAUDIT_TARGET_RC:-0}" -ne 0 ]; then
+	%s
+	%s
+	%s
+	if [ "${GOAUDIT_TARGET_RC:-0}" -ne 0 ]; then
   exit 99
 fi
 	`, prepScriptForRuntime(s.runtime), setupScript, toolsCheck, profileName, image,
-		userSetup, honeypotScript(), projectStage, targetCmd, execLine, probeLine)
+		userSetup, honeypotScript(), projectStage, scriptHeredoc("/tmp/target.sh", targetCmd, "GOAUDIT_TARGET"), execLine, probeLine)
 
 	pidsLimit := int64(256)
 	hostConfig := &container.HostConfig{
@@ -451,11 +462,7 @@ SANDBOX_HOME=$(eval echo "~${SANDBOX_USER}")` + "\n"
 
 	probeLine := ""
 	if strings.TrimSpace(probeScript) != "" {
-		catProbe := fmt.Sprintf(`cat << 'EOF_PROBE_CMD' > /tmp/probe.sh
-%s
-EOF_PROBE_CMD
-chmod +x /tmp/probe.sh
-`, probeScript)
+		catProbe := scriptHeredoc("/tmp/probe.sh", probeScript, "GOAUDIT_PROBE")
 		if s.runAsRoot {
 			probeLine = catProbe + tracedPhaseScript("probe", `bash /tmp/probe.sh`, probeTimeoutValue)
 		} else {
@@ -483,17 +490,14 @@ rm -rf /workspace/* /workspace/.[!.]* /workspace/..?* 2>/dev/null || true
 mkdir -p /workspace
 %s
 cd /workspace
-cat << 'EOF_TARGET_CMD' > /tmp/target.sh
 %s
-EOF_TARGET_CMD
-chmod +x /tmp/target.sh
 
 %s
 %s
 if [ "${GOAUDIT_TARGET_RC:-0}" -ne 0 ]; then
   exit 99
 fi
-`, profileName, img, userSetup, honeypotScript(), workspaceHoneypotScript(), targetCmd, execLine, probeLine)
+`, profileName, img, userSetup, honeypotScript(), workspaceHoneypotScript(), scriptHeredoc("/tmp/target.sh", targetCmd, "GOAUDIT_TARGET"), execLine, probeLine)
 
 	execCfg := container.ExecOptions{
 		AttachStderr: true,
