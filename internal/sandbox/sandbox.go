@@ -608,4 +608,3 @@ echo 'DATABASE_URL=postgres://admin:s3cret@db.example.com:5432/prod' > /workspac
 echo 'API_SECRET=sk_live_goaudit_honeypot_workspace' >> /workspace/.env
 `
 }
-
