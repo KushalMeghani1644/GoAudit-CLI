@@ -26,6 +26,16 @@ func findByReason(findings []report.Finding, reason string) *report.Finding {
 	return nil
 }
 
+func countByReason(findings []report.Finding, reason string) int {
+	count := 0
+	for _, f := range findings {
+		if f.ReasonCode == reason {
+			count++
+		}
+	}
+	return count
+}
+
 func TestDetectsCredentialReadAWS(t *testing.T) {
 	f := findByReason(parse(t,
 		`openat(AT_FDCWD, "/root/.aws/credentials", O_RDONLY) = 3`),
@@ -164,55 +174,235 @@ func TestDetectsSuspiciousExecFromTmp(t *testing.T) {
 	}
 }
 
-func TestDetectsPrivilegeEscalation(t *testing.T) {
-	input := "GOAUDIT_RUNTIME_META:phase=target\nsetuid(0) = 0"
-	f := findByReason(parse(t, input), "PRIVILEGE_ESCALATION")
-	if f == nil {
-		t.Fatal("expected PRIVILEGE_ESCALATION for setuid(0) after target phase")
+func TestDetectsSuccessfulPrivilegeEscalationSyscalls(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+	}{
+		{name: "setuid", line: "setuid(0) = 0"},
+		{name: "setgid", line: "setgid(0) = 0"},
+		{name: "setuid annotated root", line: "setuid(0 /* root */) = 0"},
+		{name: "seteuid", line: "seteuid(0) = 0"},
+		{name: "setegid", line: "setegid(0) = 0"},
+		{name: "setreuid", line: "setreuid(0, 0) = 0"},
+		{name: "setregid", line: "setregid(0, 0) = 0"},
+		{name: "setreuid effective root", line: "setreuid(-1, 0) = 0"},
+		{name: "setregid effective root", line: "setregid(-1, 0) = 0"},
+		{name: "setresuid effective root", line: "setresuid(-1, 0, -1) = 0"},
+		{name: "setresgid saved root", line: "setresgid(-1, -1, 0) = 0"},
+		{name: "setgroups", line: "setgroups(2, [0, 1000]) = 0"},
+		{name: "setgroups annotated root", line: "setgroups(2, [0 /* root */, 1000]) = 0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := "GOAUDIT_RUNTIME_META:phase=target\n" + tt.line
+			f := findByReason(parse(t, input), "PRIVILEGE_ESCALATION")
+			if f == nil {
+				t.Fatalf("expected PRIVILEGE_ESCALATION for %s", tt.line)
+			}
+			if f.Severity != report.SeverityCritical {
+				t.Fatalf("expected critical severity, got %s", f.Severity)
+			}
+			if f.Type != "privilege" {
+				t.Fatalf("expected privilege type, got %s", f.Type)
+			}
+			if f.Confidence != 92 {
+				t.Fatalf("expected confidence 92, got %d", f.Confidence)
+			}
+		})
 	}
 }
 
-func TestSetuidBeforeTargetPhaseNotFlagged(t *testing.T) {
-	// setuid(0) from su/PAM happens before phase=target and should be ignored.
-	for _, f := range parse(t, `setuid(0) = 0`) {
-		if f.ReasonCode == "PRIVILEGE_ESCALATION" {
-			t.Fatal("should not flag setuid(0) before target phase (su/PAM noise)")
-		}
+func TestDetectsFailedPrivilegeEscalationAttempts(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+	}{
+		{name: "setuid", line: "setuid(0) = -1 EPERM (Operation not permitted)"},
+		{name: "setgid", line: "setgid(0) = -1 EPERM (Operation not permitted)"},
+		{name: "setuid annotated root", line: "setuid(0 /* root */) = -1 EPERM (Operation not permitted)"},
+		{name: "seteuid", line: "seteuid(0) = -1 EPERM (Operation not permitted)"},
+		{name: "setegid", line: "setegid(0) = -1 EPERM (Operation not permitted)"},
+		{name: "setreuid", line: "setreuid(0, 0) = -1 EPERM (Operation not permitted)"},
+		{name: "setregid", line: "setregid(0, 0) = -1 EPERM (Operation not permitted)"},
+		{name: "setreuid effective root", line: "setreuid(-1, 0) = -1 EPERM (Operation not permitted)"},
+		{name: "setregid effective root", line: "setregid(-1, 0) = -1 EPERM (Operation not permitted)"},
+		{name: "setresuid saved root", line: "setresuid(-1, -1, 0) = -1 EPERM (Operation not permitted)"},
+		{name: "setresgid effective root", line: "setresgid(-1, 0, -1) = -1 EPERM (Operation not permitted)"},
+		{name: "setgroups", line: "setgroups(2, [0, 1000]) = -1 EPERM (Operation not permitted)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := "GOAUDIT_RUNTIME_META:phase=target\n" + tt.line
+			findings := parse(t, input)
+			if f := findByReason(findings, "PRIVILEGE_ESCALATION"); f != nil {
+				t.Fatalf("should not emit PRIVILEGE_ESCALATION for failed attempt: %+v", *f)
+			}
+			f := findByReason(findings, "PRIVILEGE_ESCALATION_ATTEMPT")
+			if f == nil {
+				t.Fatalf("expected PRIVILEGE_ESCALATION_ATTEMPT for %s", tt.line)
+			}
+			if f.Severity != report.SeverityWarning {
+				t.Fatalf("expected warning severity, got %s", f.Severity)
+			}
+			if f.Type != "privilege" {
+				t.Fatalf("expected privilege type, got %s", f.Type)
+			}
+			if f.Confidence != 75 {
+				t.Fatalf("expected confidence 75, got %d", f.Confidence)
+			}
+		})
 	}
 }
 
-func TestSetreuidNoiseNotFlagged(t *testing.T) {
-	input := "GOAUDIT_RUNTIME_META:phase=target\nsetreuid(0, -1) = 0"
-	for _, f := range parse(t, input) {
-		if f.ReasonCode == "PRIVILEGE_ESCALATION" {
-			t.Fatal("should not flag setreuid(0,-1) user-switch noise")
-		}
+func TestPrivilegeEscalationNoiseNotFlagged(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "setuid non-root", input: "GOAUDIT_RUNTIME_META:phase=target\nsetuid(1000) = 0"},
+		{name: "setgid non-root", input: "GOAUDIT_RUNTIME_META:phase=target\nsetgid(1000) = 0"},
+		{name: "setreuid user switch", input: "GOAUDIT_RUNTIME_META:phase=target\nsetreuid(0, -1) = 0"},
+		{name: "setregid user switch", input: "GOAUDIT_RUNTIME_META:phase=target\nsetregid(0, -1) = 0"},
+		{name: "setresuid real root only", input: "GOAUDIT_RUNTIME_META:phase=target\nsetresuid(0, -1, -1) = 0"},
+		{name: "setresgid real root only", input: "GOAUDIT_RUNTIME_META:phase=target\nsetresgid(0, -1, -1) = 0"},
+		{name: "setgroups no root group", input: "GOAUDIT_RUNTIME_META:phase=target\nsetgroups(1, [1000]) = 0"},
+		{name: "success before target phase", input: "setuid(0) = 0"},
+		{name: "failed attempt before target phase", input: "setuid(0) = -1 EPERM (Operation not permitted)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, f := range parse(t, tt.input) {
+				if f.ReasonCode == "PRIVILEGE_ESCALATION" || f.ReasonCode == "PRIVILEGE_ESCALATION_ATTEMPT" {
+					t.Fatalf("should not flag privilege finding for %s, got %+v", tt.name, f)
+				}
+			}
+		})
 	}
 }
 
-func TestDetectsSetreuidRootEscalation(t *testing.T) {
-	input := "GOAUDIT_RUNTIME_META:phase=target\nsetreuid(0, 0) = 0"
-	f := findByReason(parse(t, input), "PRIVILEGE_ESCALATION")
-	if f == nil {
-		t.Fatal("expected PRIVILEGE_ESCALATION for setreuid(0,0)")
+func TestPrivilegeEscalationAttemptDeduplicatesByPhase(t *testing.T) {
+	input := "GOAUDIT_RUNTIME_META:phase=target\n" +
+		"setuid(0) = -1 EPERM (Operation not permitted)\n" +
+		"setuid(0) = -1 EPERM (Operation not permitted)"
+	findings := parse(t, input)
+	if got := countByReason(findings, "PRIVILEGE_ESCALATION_ATTEMPT"); got != 1 {
+		t.Fatalf("expected one deduplicated PRIVILEGE_ESCALATION_ATTEMPT, got %d", got)
 	}
 }
 
-func TestNonRootSetuidNotFlagged(t *testing.T) {
-	input := "GOAUDIT_RUNTIME_META:phase=target\nsetuid(1000) = 0"
-	for _, f := range parse(t, input) {
-		if f.ReasonCode == "PRIVILEGE_ESCALATION" {
-			t.Fatal("should not flag setuid to non-root")
-		}
+func TestPrivilegeEscalationAttemptAndSuccessBothEmit(t *testing.T) {
+	input := "GOAUDIT_RUNTIME_META:phase=target\n" +
+		"setuid(0) = -1 EPERM (Operation not permitted)\n" +
+		"setuid(0) = 0"
+	findings := parse(t, input)
+	if got := countByReason(findings, "PRIVILEGE_ESCALATION_ATTEMPT"); got != 1 {
+		t.Fatalf("expected one PRIVILEGE_ESCALATION_ATTEMPT, got %d", got)
+	}
+	if got := countByReason(findings, "PRIVILEGE_ESCALATION"); got != 1 {
+		t.Fatalf("expected one PRIVILEGE_ESCALATION, got %d", got)
 	}
 }
 
-func TestFailedSetuidRootNotFlagged(t *testing.T) {
-	input := "GOAUDIT_RUNTIME_META:phase=target\nsetuid(0) = -1 EPERM (Operation not permitted)"
-	for _, f := range parse(t, input) {
-		if f.ReasonCode == "PRIVILEGE_ESCALATION" {
-			t.Fatal("should not flag failed setuid(0)")
-		}
+func TestPrivilegeEscalationAttemptsDeduplicateBySyscallAndArgs(t *testing.T) {
+	input := "GOAUDIT_RUNTIME_META:phase=target\n" +
+		"setuid(0) = -1 EPERM (Operation not permitted)\n" +
+		"setgid(0) = -1 EPERM (Operation not permitted)"
+	findings := parse(t, input)
+	if got := countByReason(findings, "PRIVILEGE_ESCALATION_ATTEMPT"); got != 2 {
+		t.Fatalf("expected separate setuid/setgid privilege attempts, got %d", got)
+	}
+}
+
+func TestPrivilegeEscalationProbePhaseEvidence(t *testing.T) {
+	tests := []struct {
+		name       string
+		line       string
+		reasonCode string
+	}{
+		{name: "attempt", line: "setuid(0) = -1 EPERM (Operation not permitted)", reasonCode: "PRIVILEGE_ESCALATION_ATTEMPT"},
+		{name: "success", line: "setuid(0) = 0", reasonCode: "PRIVILEGE_ESCALATION"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := "GOAUDIT_RUNTIME_META:phase=probe\n" + tt.line
+			f := findByReason(parse(t, input), tt.reasonCode)
+			if f == nil {
+				t.Fatalf("expected %s for probe phase", tt.reasonCode)
+			}
+			if !strings.Contains(f.Evidence, "[runtime probe]") {
+				t.Fatalf("expected runtime probe evidence, got %q", f.Evidence)
+			}
+		})
+	}
+}
+
+func TestDetectsPrivilegeHelperExecAttempts(t *testing.T) {
+	tests := []struct {
+		name   string
+		line   string
+		reason string
+	}{
+		{name: "sudo binary", line: `execve("/usr/bin/sudo", ["sudo", "id"], 0x7ffd3f) = -1 ENOENT (No such file or directory)`, reason: "PRIVILEGE_ESCALATION_EXEC"},
+		{name: "sudo through shell", line: `execve("/bin/sh", ["sh", "-c", "sudo cat /etc/shadow"], 0x7ffd3f) = 0`, reason: "PRIVILEGE_ESCALATION_EXEC"},
+		{name: "su through shell", line: `execve("/bin/sh", ["sh", "-c", "su root -c \"id\""], 0x7ffd3f) = 0`, reason: "PRIVILEGE_ESCALATION_EXEC"},
+		{name: "pkexec through shell", line: `execve("/bin/sh", ["sh", "-c", "pkexec id"], 0x7ffd3f) = 0`, reason: "PRIVILEGE_ESCALATION_EXEC"},
+		{name: "setcap", line: `execve("/bin/sh", ["sh", "-c", "setcap cap_sys_admin+ep /bin/bash"], 0x7ffd3f) = 0`, reason: "CAPABILITY_ESCALATION"},
+		{name: "unshare", line: `execve("/bin/sh", ["sh", "-c", "unshare -r id"], 0x7ffd3f) = 0`, reason: "NAMESPACE_ESCAPE_ATTEMPT"},
+		{name: "nsenter", line: `execve("/bin/sh", ["sh", "-c", "nsenter -t 1 -m -u -i -n -p -- id"], 0x7ffd3f) = 0`, reason: "NAMESPACE_ESCAPE_ATTEMPT"},
+		{name: "ld preload", line: `execve("/bin/sh", ["sh", "-c", "LD_PRELOAD=/tmp/goaudit-preload.so /usr/bin/passwd"], 0x7ffd3f) = 0`, reason: "LD_PRELOAD_PRIVILEGE_ATTEMPT"},
+		{name: "chmod suid shell", line: `execve("/bin/sh", ["sh", "-c", "chmod 4755 /tmp/goaudit-suid-test"], 0x7ffd3f) = 0`, reason: "SUID_SGID_BIT_SET"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := "GOAUDIT_RUNTIME_META:phase=target\n" + tt.line
+			f := findByReason(parse(t, input), tt.reason)
+			if f == nil {
+				t.Fatalf("expected %s for %s", tt.reason, tt.line)
+			}
+			if f.Type != "privilege" {
+				t.Fatalf("expected privilege type, got %s", f.Type)
+			}
+		})
+	}
+}
+
+func TestDetectsSUIDSGIDChmodSyscalls(t *testing.T) {
+	tests := []string{
+		`chmod("/tmp/goaudit-suid-test", 04755) = 0`,
+		`chmod("/tmp/goaudit-sgid-test", 02755) = -1 EPERM (Operation not permitted)`,
+		`fchmodat(AT_FDCWD, "/tmp/goaudit-suid-test", 04755, 0) = 0`,
+	}
+	for _, line := range tests {
+		t.Run(line, func(t *testing.T) {
+			input := "GOAUDIT_RUNTIME_META:phase=target\n" + line
+			f := findByReason(parse(t, input), "SUID_SGID_BIT_SET")
+			if f == nil {
+				t.Fatalf("expected SUID_SGID_BIT_SET for %s", line)
+			}
+			if f.Type != "privilege" {
+				t.Fatalf("expected privilege type, got %s", f.Type)
+			}
+		})
+	}
+}
+
+func TestDetectsAccountFileAccess(t *testing.T) {
+	tests := []string{
+		`openat(AT_FDCWD, "/etc/shadow", O_RDONLY) = -1 EACCES (Permission denied)`,
+		`openat(AT_FDCWD, "/etc/passwd", O_WRONLY|O_APPEND) = -1 EACCES (Permission denied)`,
+	}
+	for _, line := range tests {
+		t.Run(line, func(t *testing.T) {
+			input := "GOAUDIT_RUNTIME_META:phase=target\n" + line
+			f := findByReason(parse(t, input), "ACCOUNT_FILE_ACCESS")
+			if f == nil {
+				t.Fatalf("expected ACCOUNT_FILE_ACCESS for %s", line)
+			}
+			if f.Type != "privilege" {
+				t.Fatalf("expected privilege type, got %s", f.Type)
+			}
+		})
 	}
 }
 

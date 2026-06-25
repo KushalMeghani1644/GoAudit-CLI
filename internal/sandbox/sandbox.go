@@ -123,7 +123,7 @@ func (s *Sandbox) RunProjectCommand(ctx context.Context, targetCmd, probeScript,
 }
 
 // StraceTraceSet is the full set of syscalls traced by GoAudit.
-const StraceTraceSet = "open,openat,openat2,connect,execve,chmod,fchmod,fchmodat,rename,unlink,unlinkat,setuid,setgid,setreuid,setregid,socket,bind,listen,symlink,symlinkat,memfd_create,ptrace,sendto,sendmsg"
+const StraceTraceSet = "open,openat,openat2,connect,execve,chmod,fchmod,fchmodat,rename,unlink,unlinkat,setuid,setgid,setreuid,setregid,setresuid,setresgid,setgroups,socket,bind,listen,symlink,symlinkat,memfd_create,ptrace,sendto,sendmsg"
 
 const targetTimeout = "180s"
 const defaultProbeTimeout = "30s"
@@ -608,3 +608,4 @@ echo 'DATABASE_URL=postgres://admin:s3cret@db.example.com:5432/prod' > /workspac
 echo 'API_SECRET=sk_live_goaudit_honeypot_workspace' >> /workspace/.env
 `
 }
+

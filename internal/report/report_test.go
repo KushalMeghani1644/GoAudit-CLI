@@ -81,6 +81,34 @@ func TestEvaluateDataExfilIsMalicious(t *testing.T) {
 	}
 }
 
+func TestEvaluatePrivilegeEscalationIsMalicious(t *testing.T) {
+	verdict, _ := Evaluate([]Finding{
+		{Severity: SeverityCritical, ReasonCode: "PRIVILEGE_ESCALATION"},
+	}, defaultOpts)
+	if verdict != VerdictMalicious {
+		t.Fatalf("expected malicious verdict for PRIVILEGE_ESCALATION, got %s", verdict)
+	}
+}
+
+func TestEvaluatePrivilegeEscalationAttemptIsSuspicious(t *testing.T) {
+	verdict, _ := Evaluate([]Finding{
+		{Severity: SeverityWarning, ReasonCode: "PRIVILEGE_ESCALATION_ATTEMPT"},
+	}, defaultOpts)
+	if verdict != VerdictSuspicious {
+		t.Fatalf("expected suspicious verdict for PRIVILEGE_ESCALATION_ATTEMPT, got %s", verdict)
+	}
+}
+
+func TestEvaluatePrivilegeEscalationAttemptWithMaliciousFinding(t *testing.T) {
+	verdict, _ := Evaluate([]Finding{
+		{Severity: SeverityWarning, ReasonCode: "PRIVILEGE_ESCALATION_ATTEMPT"},
+		{Severity: SeverityCritical, ReasonCode: "CREDENTIAL_READ"},
+	}, defaultOpts)
+	if verdict != VerdictMalicious {
+		t.Fatalf("expected malicious verdict when attempt combines with hard malicious finding, got %s", verdict)
+	}
+}
+
 // Edge case tests for scoring
 func TestEvaluate_ScoringEdgeCases(t *testing.T) {
 	tests := []struct {

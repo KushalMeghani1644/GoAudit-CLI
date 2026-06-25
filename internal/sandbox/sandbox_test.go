@@ -44,7 +44,7 @@ func TestWorkspaceHoneypotScript(t *testing.T) {
 func TestStraceTraceSetContainsExpectedSyscalls(t *testing.T) {
 	expected := []string{
 		"open", "openat", "connect", "execve",
-		"chmod", "setuid", "setgid",
+		"chmod", "setuid", "setgid", "setreuid", "setregid", "setresuid", "setresgid", "setgroups",
 		"symlink", "symlinkat", "memfd_create", "ptrace",
 		"socket", "bind", "listen", "sendto", "sendmsg",
 	}

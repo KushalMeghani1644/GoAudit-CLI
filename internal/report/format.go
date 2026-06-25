@@ -143,6 +143,22 @@ func behaviorObservations(findings []Finding) []string {
 			add("symlink", "During install, the target created symlinks that point at sensitive credential paths.")
 		case "SUSPICIOUS_EXEC":
 			add("exec", "During install, the target executed a suspicious program or shell command.")
+		case "PRIVILEGE_ESCALATION":
+			add("privilege-escalation", "During install, the target successfully switched to root UID/GID inside the sandbox.")
+		case "PRIVILEGE_ESCALATION_ATTEMPT":
+			add("privilege-attempt", "During install, the target attempted to switch to root UID/GID, but the sandbox denied it.")
+		case "PRIVILEGE_ESCALATION_EXEC":
+			add("privilege-helper", "During install, the target invoked a privilege escalation helper such as sudo, su, or pkexec.")
+		case "SUID_SGID_BIT_SET":
+			add("suid-sgid", "During install, the target attempted to set SUID or SGID permission bits for elevated future execution.")
+		case "CAPABILITY_ESCALATION":
+			add("capability", "During install, the target attempted to grant Linux capabilities to an executable.")
+		case "NAMESPACE_ESCAPE_ATTEMPT":
+			add("namespace", "During install, the target invoked namespace tooling commonly used for sandbox or container escape attempts.")
+		case "LD_PRELOAD_PRIVILEGE_ATTEMPT":
+			add("ld-preload", "During install, the target attempted LD_PRELOAD injection against a privileged helper.")
+		case "ACCOUNT_FILE_ACCESS":
+			add("account-file", "During install, the target accessed Unix account files such as /etc/passwd or /etc/shadow.")
 		case "DATA_EXFIL":
 			where := f.Host
 			if where == "" {

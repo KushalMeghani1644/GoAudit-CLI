@@ -23,14 +23,15 @@ func HasPrepFailure(findings []report.Finding) bool {
 }
 
 var (
-	fsRegex   = regexp.MustCompile(`(?i)(?:open|openat|openat2).*?\"(.*?)\",\s*(?:\{[^}]*flags=)?([A-Z_\|]+)`)
-	netRegex  = regexp.MustCompile(`connect\(.*sa_family=(?:AF_INET|AF_INET6).*?sin6?_port=htons\((\d+)\).*?(?:inet_addr\("(.*?)"\)|inet_pton\([^,]+,\s*"(.*?)")`)
-	execRegex = regexp.MustCompile(`(?i)execve\(\"(.*?)\",\s*\[(.*?)\]`)
-	mutRegex  = regexp.MustCompile(`(?i)(?:chmod|fchmod|fchmodat|rename|unlink|unlinkat)\(\"?(.*?)\"?[,)]`)
-	privRegex = regexp.MustCompile(`(?i)(setuid|setgid|setreuid|setregid)\(([^)]*)\)`)
+	fsRegex    = regexp.MustCompile(`(?i)(?:open|openat|openat2).*?\"(.*?)\",\s*(?:\{[^}]*flags=)?([A-Z_\|]+)`)
+	netRegex   = regexp.MustCompile(`connect\(.*sa_family=(?:AF_INET|AF_INET6).*?sin6?_port=htons\((\d+)\).*?(?:inet_addr\("(.*?)"\)|inet_pton\([^,]+,\s*"(.*?)")`)
+	execRegex  = regexp.MustCompile(`(?i)execve\(\"(.*?)\",\s*\[(.*?)\]`)
+	mutRegex   = regexp.MustCompile(`(?i)(?:chmod|fchmod|fchmodat|rename|unlink|unlinkat)\(\"?(.*?)\"?[,)]`)
+	privRegex  = regexp.MustCompile(`(?i)(setuid|setgid|seteuid|setegid|setreuid|setregid|setresuid|setresgid|setgroups)\(([^)]*)\)`)
+	chmodRegex = regexp.MustCompile(`(?i)(?:chmod|fchmodat)\([^"]*"?([^",)]*)"?\s*,\s*0?([0-7]{3,4})`)
 
-	readCriticalPaths  = regexp.MustCompile(`(?i)((?:^|.*?/)\.env(?:\b|$)|.*?/\.ssh/.*?|.*?/\.aws/.*?|.*?/\.kube/.*?|.*?/\.git-credentials|.*?/\.npmrc|.*?id_rsa)`)
-	writeCriticalPaths = regexp.MustCompile(`(?i)(.*?/\.bashrc|.*?/\.zshrc|.*?/\.profile|.*?/\.ssh/authorized_keys|^/etc/crontab|^/etc/cron\..*|^/usr/local/bin/.*|^/usr/bin/.*)`)
+	readCriticalPaths  = regexp.MustCompile(`(?i)((?:^|.*?/)\.env(?:\b|$)|.*?/\.ssh/.*?|.*?/\.aws/.*?|.*?/\.kube/.*?|.*?/\.git-credentials|.*?/\.npmrc|.*?id_rsa|^/etc/shadow$)`)
+	writeCriticalPaths = regexp.MustCompile(`(?i)(.*?/\.bashrc|.*?/\.zshrc|.*?/\.profile|.*?/\.ssh/authorized_keys|^/etc/crontab|^/etc/cron\..*|^/usr/local/bin/.*|^/usr/bin/.*|^/etc/passwd$|^/etc/shadow$)`)
 	writeAllowedPaths  = regexp.MustCompile(`(?i)(^/tmp/|^/dev/|^/proc/|^/sys/|^/workspace/|node_modules/|\.npm/|\.cache/|site-packages/|/var/tmp/|/pnpm/store/|pnpm-state\.json|^/usr/local/lib/|^/usr/lib/|(^|/)package(-lock)?\.json$|(^|/)pnpm-lock\.yaml$|(^|/)bun\.lockb?$|\.hm$|^/root/\.config/|^/home/.*?/\.config/|^/root/\.local/|^/home/.*?/\.local/|^/root/\.bun/|^/home/.*?/\.bun/)`)
 
 	execSuspiciousBinaries = regexp.MustCompile(`(?i)(.*?/nc$|.*?/ncat$|.*?/netcat$|^/tmp/.*)`)
@@ -231,6 +232,22 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 		if path, flags, ok := parseOpenPathFlags(line); ok {
 			failed := strings.Contains(line, "= -1 ")
 			isWrite := strings.Contains(flags, "O_WRONLY") || strings.Contains(flags, "O_RDWR") || strings.Contains(flags, "O_CREAT")
+			if isAccountFile(path) {
+				key := "ACCOUNT_FILE_ACCESS:" + path + ":" + phaseTag(probePhase, targetPhase)
+				if !seen[key] {
+					seen[key] = true
+					confidence := 92
+					severity := report.SeverityCritical
+					evidence := "Accessed Unix account database file"
+					if failed {
+						confidence = 78
+						severity = report.SeverityWarning
+						evidence = "Attempted to access Unix account database file failed in sandbox"
+					}
+					emit(report.Finding{Severity: severity, Type: "privilege", ReasonCode: "ACCOUNT_FILE_ACCESS", Path: path, Confidence: confidence, Evidence: evidence})
+				}
+				continue
+			}
 
 			if !isWrite {
 				if failed {
@@ -269,13 +286,21 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 
 		// --- Exec ---
 		if execMatches := execRegex.FindStringSubmatch(line); len(execMatches) > 2 {
-			// Skip failed syscalls.
-			if strings.Contains(line, "= -1 ") {
-				continue
-			}
 			bin := execMatches[1]
 			args := execMatches[2]
 			argsLower := strings.ToLower(args)
+			if f, ok := privilegeExecFinding(bin, args, strings.Contains(line, "= -1 ")); ok {
+				key := f.ReasonCode + ":" + f.Path + ":" + phaseTag(probePhase, targetPhase)
+				if !seen[key] {
+					seen[key] = true
+					emit(f)
+				}
+				continue
+			}
+			// Skip other failed exec syscalls.
+			if strings.Contains(line, "= -1 ") {
+				continue
+			}
 			if strings.HasSuffix(bin, "/crontab") || bin == "crontab" || (isShellBinary(bin) && strings.Contains(argsLower, "crontab")) {
 				key := "PERSISTENCE_WRITE:crontab:" + phaseTag(probePhase, targetPhase)
 				if !seen[key] {
@@ -306,6 +331,22 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 
 		// --- Mutation ---
 		if mutMatches := mutRegex.FindStringSubmatch(line); len(mutMatches) > 1 {
+			if path, mode, ok := parseChmodModePath(line); ok && hasSUIDOrSGIDBit(mode) {
+				key := "SUID_SGID_BIT_SET:" + path + ":" + mode + ":" + phaseTag(probePhase, targetPhase)
+				if !seen[key] {
+					seen[key] = true
+					confidence := 90
+					severity := report.SeverityCritical
+					evidence := "Set SUID/SGID permission bits on executable path"
+					if strings.Contains(line, "= -1 ") {
+						confidence = 78
+						severity = report.SeverityWarning
+						evidence = "Attempted to set SUID/SGID permission bits failed in sandbox"
+					}
+					emit(report.Finding{Severity: severity, Type: "privilege", ReasonCode: "SUID_SGID_BIT_SET", Path: path + " mode " + mode, Confidence: confidence, Evidence: evidence})
+				}
+				continue
+			}
 			// Skip failed syscalls.
 			if strings.Contains(line, "= -1 ") {
 				continue
@@ -330,16 +371,31 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 			}
 			isRootEscalation := false
 			switch syscall {
-			case "setuid", "setgid":
-				isRootEscalation = len(args) >= 1 && args[0] == "0"
+			case "setuid", "setgid", "seteuid", "setegid":
+				isRootEscalation = len(args) >= 1 && isRootNumericArg(args[0])
 			case "setreuid", "setregid":
-				isRootEscalation = len(args) >= 2 && args[0] == "0" && args[1] == "0"
+				isRootEscalation = len(args) >= 2 && isRootNumericArg(args[1])
+			case "setresuid", "setresgid":
+				isRootEscalation = len(args) >= 3 && (isRootNumericArg(args[1]) || isRootNumericArg(args[2]))
+			case "setgroups":
+				for _, arg := range args {
+					if isRootNumericArg(arg) {
+						isRootEscalation = true
+						break
+					}
+				}
 			}
 			if isRootEscalation && targetPhase && strings.Contains(line, "= 0") {
-				key := "PRIVILEGE_ESCALATION:" + phaseTag(probePhase, targetPhase)
+				key := "PRIVILEGE_ESCALATION:" + syscall + ":" + strings.Join(args, ",") + ":" + phaseTag(probePhase, targetPhase)
 				if !seen[key] {
 					seen[key] = true
 					emit(report.Finding{Severity: report.SeverityCritical, Type: "privilege", ReasonCode: "PRIVILEGE_ESCALATION", Path: line, Confidence: 92})
+				}
+			} else if isRootEscalation && targetPhase && strings.Contains(line, "= -1") {
+				key := "PRIVILEGE_ESCALATION_ATTEMPT:" + syscall + ":" + strings.Join(args, ",") + ":" + phaseTag(probePhase, targetPhase)
+				if !seen[key] {
+					seen[key] = true
+					emit(report.Finding{Severity: report.SeverityWarning, Type: "privilege", ReasonCode: "PRIVILEGE_ESCALATION_ATTEMPT", Path: line, Confidence: 75, Evidence: "Attempted root UID/GID transition failed in sandbox"})
 				}
 			}
 			continue
@@ -580,6 +636,124 @@ func isShellBinary(bin string) bool {
 		bin == "bash" ||
 		bin == "sh" ||
 		bin == "dash"
+}
+
+func isAccountFile(path string) bool {
+	return path == "/etc/passwd" || path == "/etc/shadow"
+}
+
+func normalizeNumericArg(arg string) string {
+	arg = strings.TrimSpace(arg)
+	arg = strings.Trim(arg, "[]{}")
+	if idx := strings.Index(arg, "/*"); idx >= 0 {
+		arg = arg[:idx]
+	}
+	if idx := strings.Index(arg, " "); idx >= 0 {
+		arg = arg[:idx]
+	}
+	return strings.TrimSpace(arg)
+}
+
+func isRootNumericArg(arg string) bool {
+	return normalizeNumericArg(arg) == "0"
+}
+
+func parseChmodModePath(line string) (string, string, bool) {
+	m := chmodRegex.FindStringSubmatch(line)
+	if len(m) > 2 && m[1] != "" && m[2] != "" {
+		return m[1], m[2], true
+	}
+	if !strings.Contains(line, "chmod(") && !strings.Contains(line, "fchmodat(") {
+		return "", "", false
+	}
+	first := strings.Index(line, "\"")
+	if first < 0 {
+		return "", "", false
+	}
+	secondRel := strings.Index(line[first+1:], "\"")
+	if secondRel < 0 {
+		return "", "", false
+	}
+	second := first + 1 + secondRel
+	path := line[first+1 : second]
+	rest := line[second+1:]
+	parts := strings.Split(rest, ",")
+	for _, part := range parts {
+		mode := strings.TrimSpace(part)
+		end := 0
+		for end < len(mode) {
+			c := mode[end]
+			if c < '0' || c > '7' {
+				break
+			}
+			end++
+		}
+		mode = mode[:end]
+		if path != "" && len(mode) >= 3 {
+			return path, mode, true
+		}
+	}
+	return "", "", false
+}
+
+func hasSUIDOrSGIDBit(mode string) bool {
+	mode = strings.TrimSpace(mode)
+	if len(mode) < 4 {
+		return false
+	}
+	special := mode[len(mode)-4]
+	return special == '2' || special == '3' || special == '4' || special == '5' || special == '6' || special == '7'
+}
+
+func privilegeExecFinding(bin, args string, failed bool) (report.Finding, bool) {
+	path := bin + " " + args
+	argsLower := strings.ToLower(args)
+	binBase := strings.ToLower(bin)
+	if idx := strings.LastIndex(binBase, "/"); idx >= 0 {
+		binBase = binBase[idx+1:]
+	}
+	combined := strings.ToLower(bin + " " + args)
+	severity := report.SeverityCritical
+	confidence := 88
+	evidenceSuffix := ""
+	if failed {
+		severity = report.SeverityWarning
+		confidence = 74
+		evidenceSuffix = " failed in sandbox"
+	}
+	switch {
+	case binBase == "sudo" || binBase == "su" || binBase == "pkexec" ||
+		(isShellBinary(bin) && containsPrivilegeCommand(argsLower, "sudo", "su", "pkexec")):
+		return report.Finding{Severity: severity, Type: "privilege", ReasonCode: "PRIVILEGE_ESCALATION_EXEC", Path: path, Confidence: confidence, Evidence: "Executed privilege escalation helper" + evidenceSuffix}, true
+	case binBase == "setcap" || (isShellBinary(bin) && containsPrivilegeCommand(argsLower, "setcap")):
+		return report.Finding{Severity: severity, Type: "privilege", ReasonCode: "CAPABILITY_ESCALATION", Path: path, Confidence: confidence, Evidence: "Attempted to grant Linux capabilities to an executable" + evidenceSuffix}, true
+	case binBase == "unshare" || binBase == "nsenter" || (isShellBinary(bin) && containsPrivilegeCommand(argsLower, "unshare", "nsenter")):
+		return report.Finding{Severity: severity, Type: "privilege", ReasonCode: "NAMESPACE_ESCAPE_ATTEMPT", Path: path, Confidence: confidence, Evidence: "Executed namespace manipulation command" + evidenceSuffix}, true
+	case strings.Contains(combined, "ld_preload=") && (strings.Contains(combined, "/passwd") || strings.Contains(combined, " passwd")):
+		return report.Finding{Severity: severity, Type: "privilege", ReasonCode: "LD_PRELOAD_PRIVILEGE_ATTEMPT", Path: path, Confidence: confidence, Evidence: "Attempted LD_PRELOAD injection against a privileged helper" + evidenceSuffix}, true
+	case (binBase == "chmod" || isShellBinary(bin)) && containsSUIDChmod(argsLower):
+		return report.Finding{Severity: severity, Type: "privilege", ReasonCode: "SUID_SGID_BIT_SET", Path: path, Confidence: confidence, Evidence: "Attempted to set SUID/SGID permission bits" + evidenceSuffix}, true
+	}
+	return report.Finding{}, false
+}
+
+func containsPrivilegeCommand(s string, commands ...string) bool {
+	for _, cmd := range commands {
+		if regexp.MustCompile(`(^|[^a-z0-9_./-])` + regexp.QuoteMeta(cmd) + `($|[^a-z0-9_/-])`).MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSUIDChmod(argsLower string) bool {
+	if !strings.Contains(argsLower, "chmod") {
+		return false
+	}
+	return strings.Contains(argsLower, " 4755") ||
+		strings.Contains(argsLower, " 2755") ||
+		strings.Contains(argsLower, " u+s") ||
+		strings.Contains(argsLower, " g+s")
 }
 
 func finalizeDynamicFindings(findings []report.Finding) []report.Finding {

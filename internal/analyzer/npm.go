@@ -287,6 +287,8 @@ func isLocalPathSpec(spec string) bool {
 	}
 	return strings.HasPrefix(spec, "./") ||
 		strings.HasPrefix(spec, "../") ||
+		strings.HasPrefix(spec, "~/") ||
+		spec == "~" ||
 		strings.HasPrefix(spec, "/") ||
 		spec == "." ||
 		spec == ".."
@@ -300,6 +302,15 @@ func localPackagePath(spec string) string {
 	}
 	if spec == "" {
 		return ""
+	}
+	if spec == "~" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			spec = home
+		}
+	} else if strings.HasPrefix(spec, "~/") {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			spec = filepath.Join(home, strings.TrimPrefix(spec, "~/"))
+		}
 	}
 	return filepath.Clean(spec)
 }

@@ -35,6 +35,48 @@ func TestFormatHumanReportProbeSummaryCleanWhenNoInstallRisk(t *testing.T) {
 	}
 }
 
+func TestFormatHumanReportPrivilegeAttemptIsInstallWarning(t *testing.T) {
+	findings := []Finding{
+		{Severity: SeverityWarning, Type: "privilege", ReasonCode: "PRIVILEGE_ESCALATION_ATTEMPT", Path: "setuid(0) = -1 EPERM (Operation not permitted)", Evidence: "[install]"},
+	}
+	out := FormatHumanReport(findings, ReportMeta{Command: "npm install ./attempt"}, VerdictSuspicious, 62)
+	if !containsAll(out,
+		"Install-Time Warnings",
+		"PRIVILEGE ESCALATION ATTEMPT: setuid(0) = -1 EPERM (Operation not permitted)",
+	) {
+		t.Fatalf("expected privilege attempt as install-time warning, got:\n%s", out)
+	}
+	if strings.Contains(out, "Static Analysis") || strings.Contains(out, "Sandbox Reliability") {
+		t.Fatalf("expected privilege attempt to stay out of static/operational sections, got:\n%s", out)
+	}
+}
+
+func TestFormatHumanReportPrivilegeEscalationIsInstallCritical(t *testing.T) {
+	findings := []Finding{
+		{Severity: SeverityCritical, Type: "privilege", ReasonCode: "PRIVILEGE_ESCALATION", Path: "setuid(0) = 0", Evidence: "[install]"},
+	}
+	out := FormatHumanReport(findings, ReportMeta{Command: "npm install ./evil"}, VerdictMalicious, 80)
+	if !containsAll(out,
+		"Install-Time Behavior (observed in sandbox)",
+		"PRIVILEGE ESCALATION: setuid(0) = 0",
+	) {
+		t.Fatalf("expected privilege escalation as install-time critical behavior, got:\n%s", out)
+	}
+}
+
+func TestFormatHumanReportAccountFileAccessIsPrivilegeBehavior(t *testing.T) {
+	findings := []Finding{
+		{Severity: SeverityCritical, Type: "privilege", ReasonCode: "ACCOUNT_FILE_ACCESS", Path: "/etc/passwd", Evidence: "[install]"},
+	}
+	out := FormatHumanReport(findings, ReportMeta{Command: "npm install ./evil"}, VerdictMalicious, 80)
+	if !containsAll(out,
+		"During install, the target accessed Unix account files such as /etc/passwd or /etc/shadow.",
+		"PRIVILEGE-SENSITIVE ACCOUNT FILE ACCESS: /etc/passwd",
+	) {
+		t.Fatalf("expected account-file access to be reported as privilege-sensitive behavior, got:\n%s", out)
+	}
+}
+
 func containsAll(s string, parts ...string) bool {
 	for _, part := range parts {
 		if !strings.Contains(s, part) {

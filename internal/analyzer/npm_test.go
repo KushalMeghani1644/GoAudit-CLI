@@ -110,6 +110,30 @@ func TestRewriteSingleLocalPackageInstall(t *testing.T) {
 	}
 }
 
+func TestRewriteSingleLocalPackageInstallExpandsHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".test-malicious-pkg")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pkg := `{"name":"local-name","version":"1.0.0"}`
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rewritten, projectPath, ok := RewriteSingleLocalPackageInstall("npm install ~/.test-malicious-pkg")
+	if !ok {
+		t.Fatal("expected rewrite to succeed")
+	}
+	if rewritten != "npm install ." {
+		t.Fatalf("unexpected rewritten command: %s", rewritten)
+	}
+	if projectPath != dir {
+		t.Fatalf("unexpected project path: %s", projectPath)
+	}
+}
+
 func findByReasonCode(findings []report.Finding, code string) *report.Finding {
 	for i := range findings {
 		if findings[i].ReasonCode == code {

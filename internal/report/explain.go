@@ -8,16 +8,23 @@ type Explanation struct {
 
 var reasonExplanations = map[string]Explanation{
 	// Critical — dynamic (strace)
-	"CREDENTIAL_READ":        {"Credential Theft", "Read sensitive files like SSH keys, AWS credentials, or .env secrets"},
-	"PERSISTENCE_WRITE":      {"Persistence", "Modified system startup files (.bashrc, crontab, etc.) to survive reboots"},
-	"PRIVILEGE_ESCALATION":   {"Privilege Escalation", "Attempted to gain root privileges via setuid(0)"},
-	"SUSPICIOUS_EXEC":        {"Suspicious Process", "Executed a known attack tool (netcat, reverse shell) or ran a binary from /tmp"},
-	"FILELESS_EXEC":          {"Fileless Execution", "Used memfd_create to run code without writing to disk — a common evasion technique"},
-	"PROCESS_INJECTION":      {"Process Injection", "Used ptrace to attach to another process — possible code injection"},
-	"SYMLINK_SENSITIVE_PATH": {"Symlink Attack", "Created a symlink targeting sensitive credential files"},
-	"REVERSE_SHELL":          {"Reverse Shell", "Opened an interactive reverse shell connection"},
-	"ENV_THEFT":              {"Environment Variable Theft", "Read /proc/self/environ to steal CI secrets and environment variables"},
-	"DATA_EXFIL":             {"Data Exfiltration", "Sent data to a non-registry host after accessing credentials or opening a suspicious outbound connection"},
+	"CREDENTIAL_READ":              {"Credential Theft", "Read sensitive files like SSH keys, AWS credentials, or .env secrets"},
+	"PERSISTENCE_WRITE":            {"Persistence", "Modified system startup files (.bashrc, crontab, etc.) to survive reboots"},
+	"PRIVILEGE_ESCALATION":         {"Privilege Escalation", "Attempted to gain root privileges via setuid(0)"},
+	"PRIVILEGE_ESCALATION_ATTEMPT": {"Privilege Escalation Attempt", "Attempted to switch UID/GID to root, but the syscall failed in the sandbox"},
+	"PRIVILEGE_ESCALATION_EXEC":    {"Privilege Helper Execution", "Executed sudo, su, pkexec, or a shell command that invokes a privilege escalation helper"},
+	"SUID_SGID_BIT_SET":            {"SUID/SGID Permission Change", "Attempted to set SUID or SGID bits, which can make future executions run with elevated privileges"},
+	"CAPABILITY_ESCALATION":        {"Linux Capability Escalation", "Attempted to grant Linux capabilities to an executable"},
+	"NAMESPACE_ESCAPE_ATTEMPT":     {"Namespace Escape Attempt", "Executed namespace manipulation tooling such as unshare or nsenter"},
+	"LD_PRELOAD_PRIVILEGE_ATTEMPT": {"LD_PRELOAD Privilege Attempt", "Attempted to inject a preload library into a privileged helper"},
+	"ACCOUNT_FILE_ACCESS":          {"Privilege-Sensitive Account File Access", "Accessed /etc/passwd or /etc/shadow, which can expose account data or support privilege escalation"},
+	"SUSPICIOUS_EXEC":              {"Suspicious Process", "Executed a known attack tool (netcat, reverse shell) or ran a binary from /tmp"},
+	"FILELESS_EXEC":                {"Fileless Execution", "Used memfd_create to run code without writing to disk — a common evasion technique"},
+	"PROCESS_INJECTION":            {"Process Injection", "Used ptrace to attach to another process — possible code injection"},
+	"SYMLINK_SENSITIVE_PATH":       {"Symlink Attack", "Created a symlink targeting sensitive credential files"},
+	"REVERSE_SHELL":                {"Reverse Shell", "Opened an interactive reverse shell connection"},
+	"ENV_THEFT":                    {"Environment Variable Theft", "Read /proc/self/environ to steal CI secrets and environment variables"},
+	"DATA_EXFIL":                   {"Data Exfiltration", "Sent data to a non-registry host after accessing credentials or opening a suspicious outbound connection"},
 
 	// Warning — dynamic (strace)
 	"EXTERNAL_NETWORK":          {"Unknown Network Connection", "Connected to a host that isn't a known package registry"},

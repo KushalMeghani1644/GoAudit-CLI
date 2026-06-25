@@ -160,14 +160,16 @@ func (r *Reporter) PrintLiveFinding(f Finding) {
 	if r.CIMode {
 		return
 	}
-	if !r.Verbose && f.Severity != SeverityCritical {
+	if !r.Verbose && f.Severity != SeverityCritical && !isPrivilegeWarning(f) {
 		return
 	}
 	if f.ReasonCode == "RUNTIME_METADATA" {
 		return
 	}
 	if f.Severity == SeverityCritical {
-		if f.Type == "fs_read" {
+		if f.Type == "privilege" {
+			color.Red("[CRITICAL] %s: %s\r\n", ExplainReason(f.ReasonCode).Title, f.Path)
+		} else if f.Type == "fs_read" {
 			color.Red("[CRITICAL] File Read Detected: %s\r\n", f.Path)
 		} else if f.Type == "fs_write" {
 			color.Red("[CRITICAL] Suspicious File Write: %s\r\n", f.Path)
@@ -180,6 +182,10 @@ func (r *Reporter) PrintLiveFinding(f Finding) {
 	}
 
 	if f.Severity == SeverityWarning {
+		if isPrivilegeWarning(f) {
+			color.Yellow("[WARNING] %s: %s\r\n", ExplainReason(f.ReasonCode).Title, f.Path)
+			return
+		}
 		if f.Type == "network" && f.ReasonCode == "EXTERNAL_NETWORK" {
 			// Deduplicate network warnings — only print first occurrence per IP.
 			r.seenNetworkHosts[f.IP]++
@@ -203,11 +209,30 @@ func (r *Reporter) PrintLiveFinding(f Finding) {
 	}
 }
 
+func isPrivilegeWarning(f Finding) bool {
+	if f.Severity != SeverityWarning || f.Type != "privilege" {
+		return false
+	}
+	switch f.ReasonCode {
+	case "PRIVILEGE_ESCALATION_ATTEMPT", "PRIVILEGE_ESCALATION_EXEC", "SUID_SGID_BIT_SET",
+		"CAPABILITY_ESCALATION", "NAMESPACE_ESCAPE_ATTEMPT", "LD_PRELOAD_PRIVILEGE_ATTEMPT",
+		"ACCOUNT_FILE_ACCESS":
+		return true
+	default:
+		return false
+	}
+}
+
 func isHardMalicious(f Finding) bool {
 	return f.ReasonCode == "CREDENTIAL_READ" ||
 		f.ReasonCode == "PERSISTENCE_WRITE" ||
 		f.ReasonCode == "REVERSE_SHELL" ||
 		f.ReasonCode == "PRIVILEGE_ESCALATION" ||
+		f.ReasonCode == "SUID_SGID_BIT_SET" ||
+		f.ReasonCode == "CAPABILITY_ESCALATION" ||
+		f.ReasonCode == "NAMESPACE_ESCAPE_ATTEMPT" ||
+		f.ReasonCode == "LD_PRELOAD_PRIVILEGE_ATTEMPT" ||
+		f.ReasonCode == "ACCOUNT_FILE_ACCESS" ||
 		f.ReasonCode == "FILELESS_EXEC" ||
 		f.ReasonCode == "PROCESS_INJECTION" ||
 		f.ReasonCode == "ENV_THEFT" ||
@@ -219,6 +244,12 @@ func reasonWeight(reasonCode string) int {
 	switch reasonCode {
 	case "CREDENTIAL_READ", "PERSISTENCE_WRITE", "PRIVILEGE_ESCALATION", "ENV_THEFT", "DATA_EXFIL":
 		return 80
+	case "ACCOUNT_FILE_ACCESS":
+		return 80
+	case "SUID_SGID_BIT_SET", "CAPABILITY_ESCALATION", "NAMESPACE_ESCAPE_ATTEMPT", "LD_PRELOAD_PRIVILEGE_ATTEMPT":
+		return 70
+	case "PRIVILEGE_ESCALATION_ATTEMPT", "PRIVILEGE_ESCALATION_EXEC":
+		return 45
 	case "STAGED_DOWNLOADER", "SUSPICIOUS_EXEC", "SCRIPT_OBFUSCATION":
 		return 55
 	case "FILELESS_EXEC", "PROCESS_INJECTION", "SYMLINK_SENSITIVE_PATH":
