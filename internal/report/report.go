@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/diagnostic"
 	"github.com/fatih/color"
 )
 
@@ -94,6 +95,11 @@ func NewReporter(ciMode bool, verbose bool) *Reporter {
 
 func (r *Reporter) Fatalf(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, format, args...)
+	os.Exit(1)
+}
+
+func (r *Reporter) Fatal(err error) {
+	fmt.Fprint(os.Stderr, diagnostic.Format(err))
 	os.Exit(1)
 }
 func (r *Reporter) StartProgress(message string) {

@@ -2,10 +2,13 @@ package project
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/diagnostic"
 )
 
 func (p *Project) ListDirectDeps() []string {
@@ -42,7 +45,12 @@ func (p *Project) ListTransitiveDeps() ([]string, error) {
 	}
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
-		return nil, err
+		return nil, diagnostic.New(
+			fmt.Sprintf("Cannot read package-lock.json in %s.", p.Root),
+			diagnostic.Cause("GoAudit needs package-lock.json to include transitive dependencies."),
+			diagnostic.Hint("Check package-lock.json permissions, or rerun without --include-transitive."),
+			diagnostic.Wrap(err),
+		)
 	}
 
 	var lock struct {
@@ -51,7 +59,12 @@ func (p *Project) ListTransitiveDeps() ([]string, error) {
 		} `json:"packages"`
 	}
 	if err := json.Unmarshal(data, &lock); err != nil {
-		return nil, err
+		return nil, diagnostic.New(
+			fmt.Sprintf("package-lock.json is not valid JSON: %s.", lockPath),
+			diagnostic.Cause("GoAudit could not parse the lockfile to list transitive dependencies."),
+			diagnostic.Hint("Regenerate the lockfile with npm install, or rerun without --include-transitive."),
+			diagnostic.Wrap(err),
+		)
 	}
 
 	names := make(map[string]struct{})

@@ -3,7 +3,10 @@ package project
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/diagnostic"
 )
 
 func TestDetectManagerFromLockfiles(t *testing.T) {
@@ -49,6 +52,35 @@ func TestYarnLockRejected(t *testing.T) {
 	_, err := Open(root, "")
 	if err == nil {
 		t.Fatal("expected yarn.lock error")
+	}
+	out := diagnostic.Format(err)
+	for _, want := range []string{
+		"Error: Yarn projects are not supported by scan-project yet.",
+		"Cause: Found yarn.lock",
+		"Hint: Use goaudit scan with an explicit yarn command",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected yarn diagnostic to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestMissingPackageJSONDiagnostic(t *testing.T) {
+	root := t.TempDir()
+
+	_, err := Open(root, "")
+	if err == nil {
+		t.Fatal("expected missing package.json error")
+	}
+	out := diagnostic.Format(err)
+	for _, want := range []string{
+		"Error: No package.json found in",
+		"Cause: scan-project only works from a JavaScript project root.",
+		"Hint: Run GoAudit from the project root",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected missing package diagnostic to contain %q, got:\n%s", want, out)
+		}
 	}
 }
 

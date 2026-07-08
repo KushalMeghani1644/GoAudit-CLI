@@ -35,17 +35,17 @@ var scanProjectCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		mode, err := project.ParseUpgradeMode(upgradeMode)
 		if err != nil {
-			report.NewReporter(ciMode, verbose).Fatalf("%v\n", err)
+			report.NewReporter(ciMode, verbose).Fatal(err)
 		}
 
 		proj, err := project.Open(args[0], managerOverride)
 		if err != nil {
-			report.NewReporter(ciMode, verbose).Fatalf("%v\n", err)
+			report.NewReporter(ciMode, verbose).Fatal(err)
 		}
 
 		installCmd, err := project.BuildInstallCommand(proj.Manager, mode)
 		if err != nil {
-			report.NewReporter(ciMode, verbose).Fatalf("%v\n", err)
+			report.NewReporter(ciMode, verbose).Fatal(err)
 		}
 
 		reporter := report.NewReporter(ciMode, verbose)
@@ -68,7 +68,7 @@ var scanProjectCmd = &cobra.Command{
 
 		deps, err := proj.ListDepsForStatic(includeTransitive)
 		if err != nil {
-			reporter.Fatalf("Failed to list dependencies: %v\n", err)
+			reporter.Fatal(err)
 		}
 
 		if !ciMode && len(deps) > 0 {
