@@ -421,7 +421,15 @@ func (r *Reporter) Report(findings []Finding, meta ReportMeta) {
 		if strings.TrimSpace(meta.Command) == "" {
 			meta.Command = "scan"
 		}
-		fmt.Print(FormatHumanReport(findings, meta, verdict, confidence) + "\r\n")
+
+		useColor := false
+		// Enable ANSI colors only for interactive terminals and unless the user opted out.
+		if os.Getenv("NO_COLOR") == "" {
+			if fi, err := os.Stdout.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) != 0 {
+				useColor = true
+			}
+		}
+		fmt.Print(FormatHumanReportStyled(findings, meta, verdict, confidence, HumanReportStyle{Color: useColor}) + "\r\n")
 	}
 
 	if verdict == VerdictMalicious || verdict == VerdictInconclusive {

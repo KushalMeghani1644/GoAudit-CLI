@@ -6,6 +6,10 @@ import (
 	"strings"
 )
 
+type HumanReportStyle struct {
+	Color bool
+}
+
 var knownRegistryHosts = map[string]bool{
 	"registry.npmjs.org":     true,
 	"registry.yarnpkg.com":   true,
@@ -102,6 +106,190 @@ func FormatHumanReport(findings []Finding, meta ReportMeta, verdict Verdict, con
 		b.WriteString("   Use --ci for full JSON output.\n")
 	}
 	return strings.ReplaceAll(b.String(), "\n", "\r\n")
+}
+
+func FormatHumanReportStyled(findings []Finding, meta ReportMeta, verdict Verdict, confidence int, style HumanReportStyle) string {
+	var b strings.Builder
+	title := meta.Command
+	if strings.TrimSpace(title) == "" {
+		title = "scan"
+	}
+
+	// Keep layout stable across terminals; only color depends on `style.Color`.
+	horizontalRule := "────────────────────────────────────────────────────────────────"
+
+	b.WriteString("GoAudit Report\n")
+	b.WriteString(horizontalRule + "\n")
+	b.WriteString(fmt.Sprintf("Command: %s\n", title))
+
+	coloredVerdict := string(verdict)
+	switch verdict {
+	case VerdictMalicious:
+		coloredVerdict = wrapANSI(style, "1;31", string(verdict))
+	case VerdictSuspicious:
+		coloredVerdict = wrapANSI(style, "1;33", string(verdict))
+	case VerdictInconclusive:
+		coloredVerdict = wrapANSI(style, "1;35", string(verdict))
+	default:
+		coloredVerdict = wrapANSI(style, "1;32", string(verdict))
+	}
+	b.WriteString(fmt.Sprintf("Verdict: %s (confidence: %d)\n", coloredVerdict, confidence))
+
+	if meta.SandboxRuntime == "runsc" {
+		b.WriteString("Sandbox: gVisor (runsc)\n")
+	} else if meta.SandboxRuntime != "" {
+		b.WriteString(fmt.Sprintf("Sandbox: %s (install gVisor for stronger isolation)\n", meta.SandboxRuntime))
+	}
+
+	if meta.PackageName != "" {
+		if meta.PackageVersion != "" {
+			b.WriteString(fmt.Sprintf("Package: %s@%s\n", meta.PackageName, meta.PackageVersion))
+		} else {
+			b.WriteString(fmt.Sprintf("Package: %s\n", meta.PackageName))
+		}
+	}
+
+	b.WriteString("\n")
+
+	displayFindings := suppressRedundantStatic(findings)
+	installCritical, installWarnings := splitInstallDynamic(displayFindings, SeverityCritical), splitInstallDynamic(displayFindings, SeverityWarning)
+	staticCritical, staticWarnings := splitStatic(displayFindings, SeverityCritical), splitStatic(displayFindings, SeverityWarning)
+	probeCritical, probeWarnings := splitProbeDynamic(displayFindings, SeverityCritical), splitProbeDynamic(displayFindings, SeverityWarning)
+	operationalWarnings := splitOperational(displayFindings, SeverityWarning)
+	operationalCritical := splitOperational(displayFindings, SeverityCritical)
+	info := filterBySeverity(displayFindings, SeverityInfo)
+
+	// Behavior summary (plain text body, but with clearer section boundaries).
+	writeBehaviorSummary(&b, installFindings(displayFindings), verdict)
+
+	if len(installCritical) > 0 {
+		b.WriteString("\n")
+		b.WriteString("Install-Time Behavior (observed in sandbox)\n")
+		b.WriteString(horizontalRule + "\n")
+		writeFindingsListStyled(&b, installCritical, style)
+	}
+	if len(installWarnings) > 0 {
+		b.WriteString("\n")
+		b.WriteString("Install-Time Warnings\n")
+		b.WriteString(horizontalRule + "\n")
+		writeFindingsListStyled(&b, installWarnings, style)
+	}
+
+	writeProbeSummary(&b, displayFindings, len(installCritical)+len(installWarnings) > 0, len(probeCritical)+len(probeWarnings) > 0)
+
+	if len(probeCritical) > 0 {
+		b.WriteString("\n")
+		b.WriteString("Runtime Probe Findings\n")
+		b.WriteString(horizontalRule + "\n")
+		writeFindingsListStyled(&b, probeCritical, style)
+	}
+	if len(probeWarnings) > 0 {
+		b.WriteString("\n")
+		b.WriteString("Runtime Probe Warnings\n")
+		b.WriteString(horizontalRule + "\n")
+		writeFindingsListStyled(&b, probeWarnings, style)
+	}
+
+	if len(staticCritical) > 0 {
+		b.WriteString("\n")
+		b.WriteString("Static Analysis\n")
+		b.WriteString(horizontalRule + "\n")
+		writeFindingsListStyled(&b, staticCritical, style)
+	}
+	if len(staticWarnings) > 0 {
+		b.WriteString("\n")
+		b.WriteString("Static Warnings\n")
+		b.WriteString(horizontalRule + "\n")
+		writeFindingsListStyled(&b, staticWarnings, style)
+	}
+
+	if len(operationalCritical) > 0 || len(operationalWarnings) > 0 {
+		b.WriteString("\n")
+		b.WriteString("Sandbox Reliability\n")
+		b.WriteString(horizontalRule + "\n")
+		writeFindingsListStyled(&b, append(operationalCritical, operationalWarnings...), style)
+	}
+
+	b.WriteString("\n")
+	writeNetworkSummary(&b, displayFindings)
+
+	totalCritical := len(installCritical) + len(probeCritical) + len(staticCritical) + len(operationalCritical)
+	totalWarnings := len(installWarnings) + len(probeWarnings) + len(staticWarnings) + len(operationalWarnings)
+	b.WriteString(fmt.Sprintf("Summary: %s critical (%d install-time, %d probe, %d static), %s warnings, %d informational\n",
+		joinColoredCounts(style, strconvI(totalCritical), "1;31"),
+		len(installCritical), len(probeCritical), len(staticCritical),
+		joinColoredCounts(style, strconvI(totalWarnings), "1;33"),
+		len(info)))
+
+	if verdict == VerdictMalicious {
+		b.WriteString(wrapANSI(style, "1;31", "   DO NOT INSTALL this package.") + "\n")
+	} else {
+		b.WriteString(wrapANSI(style, "1;36", "   Use --ci for full JSON output.") + "\n")
+	}
+
+	return strings.ReplaceAll(b.String(), "\n", "\r\n")
+}
+
+func writeFindingsListStyled(b *strings.Builder, findings []Finding, style HumanReportStyle) {
+	for i, f := range findings {
+		ex := ExplainReason(f.ReasonCode)
+		title := ex.Title
+		if title == "" {
+			title = f.ReasonCode
+		}
+
+		context := findingContext(f)
+		sevPrefix, titleColor := severityPrefixAndColor(style, f.Severity)
+		upperTitle := strings.ToUpper(title)
+
+		if context != "" {
+			b.WriteString(fmt.Sprintf("   %d. %s %s: %s\n", i+1, sevPrefix, wrapMaybe(style, titleColor, upperTitle), context))
+		} else {
+			b.WriteString(fmt.Sprintf("   %d. %s %s\n", i+1, sevPrefix, wrapMaybe(style, titleColor, upperTitle)))
+		}
+
+		detail := lifecycleDetail(f, ex.Detail)
+		if detail != "" {
+			b.WriteString(fmt.Sprintf("      Details: %s\n", detail))
+		}
+	}
+}
+
+func severityPrefixAndColor(style HumanReportStyle, sev Severity) (string, string) {
+	switch sev {
+	case SeverityCritical:
+		return wrapANSI(style, "1;31", "[CRITICAL]"), "1;31"
+	case SeverityWarning:
+		return wrapANSI(style, "1;33", "[WARNING]"), "1;33"
+	default:
+		return wrapANSI(style, "1;36", "[INFO]"), "1;36"
+	}
+}
+
+func wrapMaybe(style HumanReportStyle, ansiCode string, text string) string {
+	if !style.Color {
+		return text
+	}
+	return "\x1b[" + ansiCode + "m" + text + "\x1b[0m"
+}
+
+func wrapANSI(style HumanReportStyle, ansiCode string, text string) string {
+	if !style.Color {
+		return text
+	}
+	return "\x1b[" + ansiCode + "m" + text + "\x1b[0m"
+}
+
+func joinColoredCounts(style HumanReportStyle, value string, ansiCode string) string {
+	if !style.Color {
+		return value
+	}
+	return "\x1b[" + ansiCode + "m" + value + "\x1b[0m"
+}
+
+func strconvI(i int) string {
+	// local helper to avoid importing strconv at the top of the file just for formatting.
+	return fmt.Sprintf("%d", i)
 }
 
 func writeBehaviorSummary(b *strings.Builder, findings []Finding, verdict Verdict) {

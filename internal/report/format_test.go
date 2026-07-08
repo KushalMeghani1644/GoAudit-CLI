@@ -77,6 +77,23 @@ func TestFormatHumanReportAccountFileAccessIsPrivilegeBehavior(t *testing.T) {
 	}
 }
 
+func TestFormatHumanReportStyledAnsiToggle(t *testing.T) {
+	findings := []Finding{
+		{Severity: SeverityCritical, Type: "fs_read", ReasonCode: "CREDENTIAL_READ", Path: "/etc/passwd", Evidence: "[install]"},
+	}
+	meta := ReportMeta{Command: "npm install ./evil"}
+
+	outWithColor := FormatHumanReportStyled(findings, meta, VerdictMalicious, 100, HumanReportStyle{Color: true})
+	if !strings.Contains(outWithColor, "\x1b[") {
+		t.Fatalf("expected ANSI escapes in colorized output, got:\n%s", outWithColor)
+	}
+
+	outWithoutColor := FormatHumanReportStyled(findings, meta, VerdictMalicious, 100, HumanReportStyle{Color: false})
+	if strings.Contains(outWithoutColor, "\x1b[") {
+		t.Fatalf("did not expect ANSI escapes in non-color output, got:\n%s", outWithoutColor)
+	}
+}
+
 func containsAll(s string, parts ...string) bool {
 	for _, part := range parts {
 		if !strings.Contains(s, part) {
