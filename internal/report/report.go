@@ -394,7 +394,7 @@ func Evaluate(findings []Finding, opts EvaluationOptions) (Verdict, int) {
 	return VerdictClean, 75
 }
 
-func (r *Reporter) Report(findings []Finding, meta ReportMeta) {
+func (r *Reporter) Report(findings []Finding, meta ReportMeta) (Verdict, int) {
 	r.StopProgress()
 	verdict, confidence := Evaluate(findings, EvaluationOptions{
 		SuppressExpectedBehavior: meta.SuppressExpectedBehavior,
@@ -431,9 +431,5 @@ func (r *Reporter) Report(findings []Finding, meta ReportMeta) {
 		}
 		fmt.Print(FormatHumanReportStyled(findings, meta, verdict, confidence, HumanReportStyle{Color: useColor}) + "\r\n")
 	}
-
-	if verdict == VerdictMalicious || verdict == VerdictInconclusive {
-		os.Exit(1)
-	}
-	os.Exit(0)
+	return verdict, confidence
 }

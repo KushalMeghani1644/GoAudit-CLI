@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 
 	"github.com/KushalMeghani1644/GoAudit-CLI/internal/analyzer"
@@ -413,7 +414,27 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 		SuppressExpectedBehavior: isNodeProfile(profile.Name),
 		Dynamic:                  dynamicMetaFromTraceHealth(traceHealth),
 	}
-	reporter.Report(findings, meta)
+	verdict, _ := reporter.Report(findings, meta)
+	if shouldFailOnVerdict(failOn, verdict) {
+		os.Exit(1)
+	}
+}
+
+func shouldFailOnVerdict(policy string, verdict report.Verdict) bool {
+	policy = strings.ToLower(strings.TrimSpace(policy))
+	switch policy {
+	case "", "never", "none", "false", "0":
+		return false
+	case "malicious":
+		return verdict == report.VerdictMalicious
+	case "inconclusive":
+		return verdict == report.VerdictInconclusive
+	case "malicious,inconclusive", "inconclusive,malicious", "all", "true", "1":
+		return verdict == report.VerdictMalicious || verdict == report.VerdictInconclusive
+	default:
+		// Safe default: don't fail closed on unknown config; treat as "never".
+		return false
+	}
 }
 
 func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report.Reporter, opts pipelineOptions) {

@@ -26,6 +26,7 @@ var (
 	cacheDir       string
 	targetTimeout  string
 	probeTimeout   string
+	failOn         string
 )
 
 type scanProfile struct {
@@ -134,5 +135,6 @@ func init() {
 	scanCmd.Flags().StringVar(&cacheDir, "cache-dir", "", "Custom directory for sandbox cache (or set GOAUDIT_CACHE_DIR)")
 	scanCmd.Flags().StringVar(&targetTimeout, "timeout", "", "Maximum time for the install/target command (default: profile-based)")
 	scanCmd.Flags().StringVar(&probeTimeout, "probe-timeout", "30s", "Maximum time for runtime import probe")
+	scanCmd.Flags().StringVar(&failOn, "fail-on", "never", "Exit non-zero on: never, malicious, inconclusive, or malicious,inconclusive")
 	rootCmd.AddCommand(scanCmd)
 }

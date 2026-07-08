@@ -16,6 +16,7 @@ var (
 	managerOverride   string
 	includeTransitive bool
 	probeAll          bool
+	// failOn is defined in scan.go (shared across scan commands).
 )
 
 // Lifecycle reason codes that are expected and noisy in scan-project mode.
@@ -174,5 +175,6 @@ func init() {
 	scanProjectCmd.Flags().BoolVar(&includeTransitive, "include-transitive", false, "Also registry-check packages from package-lock.json")
 	scanProjectCmd.Flags().BoolVar(&noCache, "no-cache", false, "Disable sandbox caching for this run (no warm container is stored)")
 	scanProjectCmd.Flags().StringVar(&cacheDir, "cache-dir", "", "Custom directory for sandbox cache (or set GOAUDIT_CACHE_DIR)")
+	scanProjectCmd.Flags().StringVar(&failOn, "fail-on", "never", "Exit non-zero on: never, malicious, inconclusive, or malicious,inconclusive")
 	rootCmd.AddCommand(scanProjectCmd)
 }
