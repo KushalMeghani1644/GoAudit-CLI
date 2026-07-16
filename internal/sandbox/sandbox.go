@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/diagnostic"
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
@@ -39,7 +40,13 @@ type Sandbox struct {
 func NewSandbox(ctx context.Context, image string, opts SandboxOptions) (*Sandbox, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
-		return nil, err
+		return nil, diagnostic.New(
+			"Cannot initialize Docker.",
+			diagnostic.Cause("GoAudit uses Docker to create the sandbox, but the Docker client could not be configured."),
+			diagnostic.Hint("Check DOCKER_HOST and Docker environment variables."),
+			diagnostic.Hint("Verify Docker works with: docker version"),
+			diagnostic.Wrap(err),
+		)
 	}
 
 	runtime := detectRuntime(ctx, cli)
@@ -61,19 +68,52 @@ func (s *Sandbox) NetworkEnabled() bool     { return s.networkEnabled }
 func (s *Sandbox) ContainerID() string      { return s.containerID }
 func (s *Sandbox) SetContainerID(id string) { s.containerID = id }
 
+// imageTagIsFloating reports tags that should be re-pulled rather than reused from a
+// potentially stale local cache (mutable distro/runtime rolling tags).
+func imageTagIsFloating(imageRef string) bool {
+	_, tag, ok := strings.Cut(imageRef, ":")
+	if !ok || tag == "" {
+		return false
+	}
+	// Digest pins are immutable.
+	if strings.HasPrefix(tag, "sha256:") {
+		return false
+	}
+	switch tag {
+	case "latest", "current", "current-slim", "stable", "edge", "nightly":
+		return true
+	}
+	// node:current-slim style where the tag contains "current".
+	if strings.Contains(tag, "current") {
+		return true
+	}
+	return false
+}
+
 func (s *Sandbox) EnsureImage(ctx context.Context) (string, error) {
-	// Always pull :latest tags to pick up newly published sandbox images.
-	if !strings.HasSuffix(s.image, ":latest") {
+	// Always pull floating tags (:latest, :current-slim, …) so local caches cannot
+	// silently pin an old mutable image. Non-floating tags are reused if present.
+	if !imageTagIsFloating(s.image) {
 		if _, err := s.cli.ImageInspect(ctx, s.image); err == nil {
 			return s.InspectImageDigest(ctx, s.image)
 		} else if !cerrdefs.IsNotFound(err) {
-			return "", err
+			return "", diagnostic.New(
+				fmt.Sprintf("Cannot inspect Docker image %s.", s.image),
+				diagnostic.Cause("Docker returned an error while checking whether the image exists locally."),
+				diagnostic.Hint("Verify Docker is running and that your user can access the Docker daemon."),
+				diagnostic.Wrap(err),
+			)
 		}
 	}
 
 	reader, err := s.cli.ImagePull(ctx, s.image, image.PullOptions{})
 	if err != nil {
-		return "", err
+		return "", diagnostic.New(
+			fmt.Sprintf("Cannot pull Docker image %s.", s.image),
+			diagnostic.Cause("The sandbox image is not available locally and Docker could not pull it."),
+			diagnostic.Hints(imagePullHints(s.image)...),
+			diagnostic.Wrap(err),
+		)
 	}
 	defer reader.Close()
 	dec := json.NewDecoder(reader)
@@ -88,16 +128,38 @@ func (s *Sandbox) EnsureImage(ctx context.Context) (string, error) {
 			if err == io.EOF {
 				break
 			}
-			return "", err
+			return "", diagnostic.New(
+				fmt.Sprintf("Docker image pull output for %s could not be parsed.", s.image),
+				diagnostic.Cause("Docker returned malformed progress output while pulling the sandbox image."),
+				diagnostic.Hint("Retry the scan; if it persists, run docker pull "+s.image+" to see the raw Docker error."),
+				diagnostic.Wrap(err),
+			)
 		}
 		if msg.Error != "" {
+			pullErr := fmt.Errorf("%s", msg.Error)
 			if msg.ErrorDetail.Message != "" {
-				return "", fmt.Errorf("%s: %s", msg.Error, msg.ErrorDetail.Message)
+				pullErr = fmt.Errorf("%s: %s", msg.Error, msg.ErrorDetail.Message)
 			}
-			return "", fmt.Errorf("%s", msg.Error)
+			return "", diagnostic.New(
+				fmt.Sprintf("Docker could not pull image %s.", s.image),
+				diagnostic.Cause("The registry rejected or failed the image pull."),
+				diagnostic.Hints(imagePullHints(s.image)...),
+				diagnostic.Wrap(pullErr),
+			)
 		}
 	}
 	return s.InspectImageDigest(ctx, s.image)
+}
+
+func imagePullHints(img string) []string {
+	hints := []string{
+		"Verify Docker is running and that the machine has network access to the image registry.",
+		"Run docker pull " + img + " to see the registry error directly.",
+	}
+	if strings.HasPrefix(img, "ghcr.io/") {
+		hints = append(hints, "If the registry requires authentication, run docker login ghcr.io.")
+	}
+	return hints
 }
 
 func (s *Sandbox) InspectImageDigest(ctx context.Context, imageRef string) (string, error) {
@@ -123,7 +185,7 @@ func (s *Sandbox) RunProjectCommand(ctx context.Context, targetCmd, probeScript,
 }
 
 // StraceTraceSet is the full set of syscalls traced by GoAudit.
-const StraceTraceSet = "open,openat,openat2,connect,execve,chmod,fchmod,fchmodat,rename,unlink,unlinkat,setuid,setgid,setreuid,setregid,setresuid,setresgid,setgroups,socket,bind,listen,symlink,symlinkat,memfd_create,ptrace,sendto,sendmsg"
+const StraceTraceSet = "open,openat,openat2,connect,execve,chmod,fchmod,fchmodat,rename,renameat,renameat2,link,linkat,mkdir,mkdirat,unlink,unlinkat,truncate,ftruncate,chown,fchown,lchown,fchownat,mount,umount2,capset,setuid,setgid,setreuid,setregid,setresuid,setresgid,setgroups,socket,bind,listen,symlink,symlinkat,memfd_create,ptrace,sendto,sendmsg,sendmmsg,sendfile,splice"
 
 const targetTimeout = "180s"
 const defaultProbeTimeout = "30s"
@@ -289,19 +351,34 @@ fi
 		Tty: false, AttachStderr: true, AttachStdout: true,
 	}, hostConfig, nil, nil, "")
 	if err != nil {
-		return nil, err
+		return nil, diagnostic.New(
+			"Cannot create sandbox container.",
+			diagnostic.Cause("Docker rejected the container configuration for the scan."),
+			diagnostic.Hints(containerCreateHints(s.runtime, projectPath)...),
+			diagnostic.Wrap(err),
+		)
 	}
 	s.containerID = resp.ID
 
 	if err := s.cli.ContainerStart(ctx, s.containerID, container.StartOptions{}); err != nil {
-		return nil, err
+		return nil, diagnostic.New(
+			"Cannot start sandbox container.",
+			diagnostic.Cause("Docker created the container but failed to start it."),
+			diagnostic.Hint("Check Docker daemon health and available CPU/memory."),
+			diagnostic.Wrap(err),
+		)
 	}
 
 	logs, err := s.cli.ContainerLogs(ctx, s.containerID, container.LogsOptions{
 		ShowStdout: true, ShowStderr: true, Follow: true,
 	})
 	if err != nil {
-		return nil, err
+		return nil, diagnostic.New(
+			"Cannot read sandbox logs.",
+			diagnostic.Cause("GoAudit started the container but could not attach to its output."),
+			diagnostic.Hint("Retry the scan; if it persists, inspect the container logs with docker logs "+s.containerID+"."),
+			diagnostic.Wrap(err),
+		)
 	}
 	pr, pw := io.Pipe()
 	go func() {
@@ -310,6 +387,17 @@ fi
 		_ = pw.CloseWithError(copyErr)
 	}()
 	return pr, nil
+}
+
+func containerCreateHints(runtime, projectPath string) []string {
+	hints := []string{"Run docker info to verify the Docker daemon is healthy."}
+	if runtime == "runsc" {
+		hints = append(hints, "If the error mentions runtime runsc, install/register gVisor or rerun without the runsc Docker runtime.")
+	}
+	if projectPath != "" {
+		hints = append(hints, "If the error mentions a bind mount, verify the project path is shared with Docker: "+projectPath)
+	}
+	return hints
 }
 
 // Cleanup removes or stops the sandbox container.
@@ -423,6 +511,25 @@ echo "GOAUDIT_WARM_READY" >&2
 	return nil
 }
 
+// resetMutableStateScript clears user-writable state left by a prior scan so
+// warm-container reuse does not leak configs, caches, or PATH-controlled files.
+// System binaries under /usr are not restored here; run-as-root scans should not
+// reuse warm caches (see pipeline cache gating).
+func resetMutableStateScript() string {
+	return `
+# --- goaudit: reset mutable state between cached scans ---
+rm -rf /tmp/* /tmp/.[!.]* /tmp/..?* /var/tmp/* /var/tmp/.[!.]* /var/tmp/..?* 2>/dev/null || true
+if [ -n "${SANDBOX_HOME:-}" ] && [ -d "${SANDBOX_HOME}" ]; then
+  # Wipe home contents (including package-manager caches and user configs).
+  find "${SANDBOX_HOME}" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+fi
+# Common non-home caches that installers may create.
+rm -rf /root/.npm /root/.cache /root/.config /root/.local /root/.bun /root/.pnpm-store 2>/dev/null || true
+rm -rf /home/*/.npm /home/*/.cache /home/*/.config /home/*/.local /home/*/.bun 2>/dev/null || true
+rm -rf /usr/local/share/.cache 2>/dev/null || true
+`
+}
+
 // ExecScan runs a scan command on an already-prepared (warm) container.
 // The container should have been created by PrepareWarm and be in a stopped state.
 func (s *Sandbox) ExecScan(ctx context.Context, targetCmd, probeScript, profileName, img string, projectPath string, targetTimeoutValue, probeTimeoutValue string) (io.Reader, error) {
@@ -443,7 +550,7 @@ func (s *Sandbox) ExecScan(ctx context.Context, targetCmd, probeScript, profileN
 		}
 	}
 
-	// Re-apply honeypots in case a previous scan deleted them.
+	// Resolve sandbox user home, wipe residual state from prior scans, then re-honeypot.
 	userSetup := ""
 	if s.runAsRoot {
 		userSetup = `SANDBOX_HOME="/root"` + "\n"
@@ -485,6 +592,7 @@ done
 
 %s
 %s
+%s
 
 rm -rf /workspace/* /workspace/.[!.]* /workspace/..?* 2>/dev/null || true
 mkdir -p /workspace
@@ -497,7 +605,7 @@ cd /workspace
 if [ "${GOAUDIT_TARGET_RC:-0}" -ne 0 ]; then
   exit 99
 fi
-`, profileName, img, userSetup, honeypotScript(), workspaceHoneypotScript(), scriptHeredoc("/tmp/target.sh", targetCmd, "GOAUDIT_TARGET"), execLine, probeLine)
+`, profileName, img, userSetup, resetMutableStateScript(), honeypotScript(), workspaceHoneypotScript(), scriptHeredoc("/tmp/target.sh", targetCmd, "GOAUDIT_TARGET"), execLine, probeLine)
 
 	execCfg := container.ExecOptions{
 		AttachStderr: true,

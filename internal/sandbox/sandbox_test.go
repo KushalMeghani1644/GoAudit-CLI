@@ -46,11 +46,46 @@ func TestStraceTraceSetContainsExpectedSyscalls(t *testing.T) {
 		"open", "openat", "connect", "execve",
 		"chmod", "setuid", "setgid", "setreuid", "setregid", "setresuid", "setresgid", "setgroups",
 		"symlink", "symlinkat", "memfd_create", "ptrace",
-		"socket", "bind", "listen", "sendto", "sendmsg",
+		"socket", "bind", "listen", "sendto", "sendmsg", "sendmmsg", "sendfile", "splice",
+		"renameat2", "truncate", "chown", "fchownat", "mount", "umount2", "capset",
 	}
 	for _, syscall := range expected {
 		if !strings.Contains(StraceTraceSet, syscall) {
 			t.Errorf("StraceTraceSet missing syscall: %s", syscall)
 		}
+	}
+}
+
+func TestResetMutableStateScript(t *testing.T) {
+	script := resetMutableStateScript()
+	for _, want := range []string{
+		"SANDBOX_HOME",
+		"/tmp/",
+		"/var/tmp/",
+		".npm",
+		".cache",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("reset script missing %q", want)
+		}
+	}
+}
+
+func TestImageTagIsFloating(t *testing.T) {
+	if !imageTagIsFloating("node:current-slim") {
+		t.Fatal("expected node:current-slim to be floating")
+	}
+	if !imageTagIsFloating("ubuntu:latest") {
+		t.Fatal("expected :latest to be floating")
+	}
+	if imageTagIsFloating("node:20.18.0") {
+		t.Fatal("did not expect pinned tag to be floating")
+	}
+	if imageTagIsFloating("node@sha256:abc") {
+		// no colon tag form used here; digest form with :sha256:
+		t.Log("skipped @ digest form")
+	}
+	if imageTagIsFloating("ghcr.io/example/img:sha256:deadbeef") {
+		t.Fatal("digest tag should not be treated as floating")
 	}
 }
