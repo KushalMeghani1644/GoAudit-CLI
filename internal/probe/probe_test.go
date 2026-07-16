@@ -28,6 +28,12 @@ func TestGenerateNodeProbeScriptSinglePackage(t *testing.T) {
 	if !strings.Contains(script, "NODE_PATH=/workspace/node_modules") {
 		t.Fatal("expected NODE_PATH to include installed packages")
 	}
+	if !strings.Contains(script, "--help") {
+		t.Fatal("expected bin --help probe")
+	}
+	if !strings.Contains(script, "GOAUDIT_PROBE_LIMITATION") {
+		t.Fatal("expected probe limitation marker")
+	}
 }
 
 func TestGenerateNodeProbeScriptScopedPackage(t *testing.T) {
