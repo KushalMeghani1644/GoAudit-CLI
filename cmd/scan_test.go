@@ -87,7 +87,34 @@ func TestPrepareLocalPackageInstallRewritesSingleLocalPackage(t *testing.T) {
 	}
 }
 
-func TestPrepareLocalPackageInstallWarnsOnMultiLocalFallback(t *testing.T) {
+func TestPrepareLocalPackageInstallRefusesMultiLocalWithoutMountCwd(t *testing.T) {
+	prev := mountCwd
+	mountCwd = false
+	defer func() { mountCwd = prev }()
+
+	runtimeCmd, projectPath, findings := prepareLocalPackageInstall("npm install ./one ./two")
+	if runtimeCmd != "npm install ./one ./two" {
+		t.Fatalf("unexpected runtime command: %s", runtimeCmd)
+	}
+	if projectPath != "" {
+		t.Fatalf("expected empty project path without --mount-cwd, got %q", projectPath)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected one warning, got %#v", findings)
+	}
+	if findings[0].ReasonCode != "LOCAL_PACKAGE_REWRITE_UNAVAILABLE" {
+		t.Fatalf("unexpected reason: %s", findings[0].ReasonCode)
+	}
+	if !strings.Contains(findings[0].Evidence, "--mount-cwd") {
+		t.Fatalf("unexpected evidence: %s", findings[0].Evidence)
+	}
+}
+
+func TestPrepareLocalPackageInstallMountCwdFallback(t *testing.T) {
+	prev := mountCwd
+	mountCwd = true
+	defer func() { mountCwd = prev }()
+
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -100,14 +127,21 @@ func TestPrepareLocalPackageInstallWarnsOnMultiLocalFallback(t *testing.T) {
 	if projectPath != wd {
 		t.Fatalf("unexpected project path: %s", projectPath)
 	}
-	if len(findings) != 1 {
-		t.Fatalf("expected one warning, got %#v", findings)
+	if len(findings) < 1 {
+		t.Fatalf("expected warnings, got %#v", findings)
 	}
-	if findings[0].ReasonCode != "LOCAL_PACKAGE_REWRITE_UNAVAILABLE" {
-		t.Fatalf("unexpected reason: %s", findings[0].ReasonCode)
+	foundRewrite := false
+	foundMount := false
+	for _, f := range findings {
+		if f.ReasonCode == "LOCAL_PACKAGE_REWRITE_UNAVAILABLE" {
+			foundRewrite = true
+		}
+		if f.ReasonCode == "PROJECT_TREE_MOUNTED" {
+			foundMount = true
+		}
 	}
-	if !strings.Contains(findings[0].Evidence, "mounted the current working directory") {
-		t.Fatalf("unexpected evidence: %s", findings[0].Evidence)
+	if !foundRewrite || !foundMount {
+		t.Fatalf("expected rewrite + mount warnings, got %#v", findings)
 	}
 }
 
