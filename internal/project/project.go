@@ -2,11 +2,12 @@ package project
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/diagnostic"
 )
 
 const (
@@ -28,7 +29,11 @@ func ParseUpgradeMode(s string) (UpgradeMode, error) {
 	case UpgradeRefreshLock, UpgradeNCU, UpgradeUpdate:
 		return UpgradeMode(s), nil
 	default:
-		return "", fmt.Errorf("unknown upgrade mode %q (use refresh-lock, ncu, or update)", s)
+		return "", diagnostic.New(
+			fmt.Sprintf("Unknown upgrade mode %q.", s),
+			diagnostic.Cause("The --upgrade-mode value must be one of: refresh-lock, ncu, or update."),
+			diagnostic.Hint("Use --upgrade-mode refresh-lock for a lockfile refresh, --upgrade-mode ncu for npm-check-updates, or --upgrade-mode update for package-manager updates."),
+		)
 	}
 }
 
@@ -49,28 +54,73 @@ type packageManifest struct {
 func Open(path string, managerOverride string) (*Project, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return nil, err
+		return nil, diagnostic.New(
+			fmt.Sprintf("Cannot resolve project path %q.", path),
+			diagnostic.Cause("GoAudit could not turn the path into an absolute filesystem path."),
+			diagnostic.Hint("Check that the path is valid for the current shell and try again."),
+			diagnostic.Wrap(err),
+		)
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
-		return nil, err
+		if os.IsNotExist(err) {
+			return nil, diagnostic.New(
+				fmt.Sprintf("Project path does not exist: %s.", abs),
+				diagnostic.Cause("scan-project needs an existing JavaScript project directory."),
+				diagnostic.Hint("Pass the directory that contains package.json."),
+				diagnostic.Wrap(err),
+			)
+		}
+		if os.IsPermission(err) {
+			return nil, diagnostic.New(
+				fmt.Sprintf("Cannot read project path: %s.", abs),
+				diagnostic.Cause("The current user does not have permission to inspect the project directory."),
+				diagnostic.Hint("Fix the directory permissions or run GoAudit as a user that can read the project."),
+				diagnostic.Wrap(err),
+			)
+		}
+		return nil, diagnostic.New(
+			fmt.Sprintf("Cannot inspect project path: %s.", abs),
+			diagnostic.Cause("GoAudit could not read filesystem metadata for the project path."),
+			diagnostic.Hint("Verify the path is accessible and try again."),
+			diagnostic.Wrap(err),
+		)
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("%s is not a directory", abs)
+		return nil, diagnostic.New(
+			fmt.Sprintf("Project path is not a directory: %s.", abs),
+			diagnostic.Cause("scan-project expects a directory, not a single file."),
+			diagnostic.Hint("Pass the folder that contains package.json."),
+		)
 	}
 
 	manifestPath := filepath.Join(abs, "package.json")
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, errors.New("package.json not found in project directory")
+			return nil, diagnostic.New(
+				fmt.Sprintf("No package.json found in %s.", abs),
+				diagnostic.Cause("scan-project only works from a JavaScript project root."),
+				diagnostic.Hint("Run GoAudit from the project root or pass the directory that contains package.json."),
+				diagnostic.Wrap(err),
+			)
 		}
-		return nil, err
+		return nil, diagnostic.New(
+			fmt.Sprintf("Cannot read package.json in %s.", abs),
+			diagnostic.Cause("GoAudit found package.json but could not read it."),
+			diagnostic.Hint("Check package.json permissions and try again."),
+			diagnostic.Wrap(err),
+		)
 	}
 
 	var manifest packageManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return nil, fmt.Errorf("parse package.json: %w", err)
+		return nil, diagnostic.New(
+			fmt.Sprintf("package.json is not valid JSON: %s.", manifestPath),
+			diagnostic.Cause("The JSON parser failed before GoAudit could detect dependencies or the package manager."),
+			diagnostic.Hint("Fix the syntax in package.json, then rerun scan-project."),
+			diagnostic.Wrap(err),
+		)
 	}
 
 	manager, err := detectManager(abs, manifest, managerOverride)
@@ -92,7 +142,11 @@ func detectManager(root string, manifest packageManifest, override string) (stri
 		case ManagerNPM, ManagerPNPM, ManagerBun:
 			return m, nil
 		default:
-			return "", fmt.Errorf("unknown manager %q (use npm, pnpm, or bun)", override)
+			return "", diagnostic.New(
+				fmt.Sprintf("Unknown package manager %q.", override),
+				diagnostic.Cause("The --manager value must be one of: npm, pnpm, or bun."),
+				diagnostic.Hint("Remove --manager to let GoAudit detect the lockfile, or pass --manager npm, --manager pnpm, or --manager bun."),
+			)
 		}
 	}
 
@@ -116,7 +170,12 @@ func detectManager(root string, manifest packageManifest, override string) (stri
 		return ManagerNPM, nil
 	}
 	if fileExists(filepath.Join(root, "yarn.lock")) {
-		return "", errors.New("yarn.lock detected: scan-project supports npm, pnpm, and bun only; use goaudit scan with a yarn command or switch package managers")
+		return "", diagnostic.New(
+			"Yarn projects are not supported by scan-project yet.",
+			diagnostic.Cause(fmt.Sprintf("Found yarn.lock in %s, but scan-project currently supports npm, pnpm, and bun.", root)),
+			diagnostic.Hint("Convert the project to npm, pnpm, or bun (for example: npm install) and rerun scan-project."),
+			diagnostic.Hint("Yarn is not supported by goaudit scan either (no yarn profile/image); do not use goaudit scan yarn install."),
+		)
 	}
 
 	return ManagerNPM, nil
