@@ -70,6 +70,10 @@ func networkEnabledForProfile(profileName string, allowNetwork bool) bool {
 // non-zero exit. It never exits itself so callers can release staged project
 // trees before terminating the process.
 func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile, reporter *report.Reporter, opts pipelineOptions) (bool, error) {
+	if err := validateFailOn(failOn); err != nil {
+		return false, err
+	}
+
 	runTargetCmd := targetCmd
 	if strings.TrimSpace(opts.runtimeCommand) != "" {
 		runTargetCmd = opts.runtimeCommand
@@ -79,6 +83,11 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 
 	reporter.StartProgress("Running static analysis...")
 
+	// Determine the policy before static analysis: host-side metadata and script
+	// retrieval must obey the same offline/network constraints as the sandbox.
+	networkEnabled := networkEnabledForProfile(profile.Name, opts.allowNetwork)
+	hostStaticNetwork := networkEnabled && !offlineMode
+
 	if !opts.skipStatic {
 		cmdFindings := analyzer.AnalyzeCommand(targetCmd)
 		findings = append(findings, cmdFindings...)
@@ -86,18 +95,34 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 			reporter.PrintLiveFinding(f)
 		}
 
-		jsFindings := analyzer.AnalyzeJSPackageManagers(targetCmd)
-		findings = append(findings, jsFindings...)
-		for _, f := range jsFindings {
-			reporter.PrintLiveFinding(f)
+		if hostStaticNetwork {
+			jsFindings := analyzer.AnalyzeJSPackageManagers(targetCmd)
+			findings = append(findings, jsFindings...)
+			for _, f := range jsFindings {
+				reporter.PrintLiveFinding(f)
+			}
+		} else if analyzer.HasLocalPackageInstall(targetCmd) {
+			// Local package inspection remains safe without host network access.
+			for _, f := range analyzer.AnalyzeJSPackageManagers(targetCmd) {
+				if strings.Contains(f.ReasonCode, "LOCAL") || strings.Contains(f.ReasonCode, "NON_REGISTRY") {
+					findings = append(findings, f)
+					reporter.PrintLiveFinding(f)
+				}
+			}
 		}
 	}
 
 	if urls := analyzer.ExtractURLs(targetCmd); len(urls) > 0 && !opts.skipStatic {
-		if offlineMode {
+		if !hostStaticNetwork {
+			evidence := "Offline mode disabled remote script retrieval"
+			if offlineMode && !networkEnabled {
+				evidence = "Offline mode and network policy disabled remote script retrieval on the host"
+			} else if !offlineMode && !networkEnabled {
+				evidence = "Network policy disabled remote script retrieval on the host"
+			}
 			f := report.Finding{
 				Severity: report.SeverityWarning, Type: "policy", ReasonCode: "INCONCLUSIVE_REMOTE_FETCH",
-				Path: strings.Join(urls, ","), Confidence: 35, Evidence: "Offline mode disabled remote script retrieval",
+				Path: strings.Join(urls, ","), Confidence: 35, Evidence: evidence,
 			}
 			findings = append(findings, f)
 			reporter.PrintLiveFinding(f)
@@ -109,9 +134,6 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 			}
 		}
 	}
-
-	// Determine network policy
-	networkEnabled := networkEnabledForProfile(profile.Name, opts.allowNetwork)
 
 	probeScript := ""
 	if len(opts.probePackages) > 0 && !opts.skipProbe && isNodeProfile(profile.Name) {
@@ -144,7 +166,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 	var cache *sandbox.CacheManager
 	usedCache := false
 	forcedRuncOffline := false
-	if !noCache {
+	if !noCache && !opts.runAsRoot {
 		cache, err = sandbox.NewCacheManager(cacheDir)
 		if err != nil && !ciMode {
 			fmt.Printf("\033[33m[WARNING] Could not initialize cache: %v. Running without cache.\033[0m\r\n", err)
@@ -376,11 +398,12 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 	findings = append(findings, dynamicFindings...)
 
 	// Cache the warm container for next time (if caching is enabled and we did a cold run).
-	if cache != nil && !noCache && !usedCache && opts.projectPath == "" {
+	if cache != nil && !noCache && !usedCache && opts.projectPath == "" && !opts.runAsRoot {
 		// Warm-prepare a fresh container for the cache.
 		reporter.UpdateProgress("Warming sandbox cache...")
 		warmSandbox, warmErr := sandbox.NewSandbox(ctx, s.Image(), sandbox.SandboxOptions{
-			RunAsRoot: opts.runAsRoot,
+			RunAsRoot:      opts.runAsRoot,
+			NetworkEnabled: networkEnabled,
 		})
 		if warmErr == nil {
 			warmSandbox.SetRuntime(s.Runtime())
@@ -432,14 +455,30 @@ func shouldFailOnVerdict(policy string, verdict report.Verdict) bool {
 	case "malicious,inconclusive", "inconclusive,malicious", "all", "true", "1":
 		return verdict == report.VerdictMalicious || verdict == report.VerdictInconclusive
 	default:
-		// Safe default: don't fail closed on unknown config; treat as "never".
+		// Unknown values are rejected at flag validation time; treat as never if reached.
 		return false
+	}
+}
+
+func validateFailOn(policy string) error {
+	policy = strings.ToLower(strings.TrimSpace(policy))
+	switch policy {
+	case "", "never", "none", "false", "0",
+		"malicious",
+		"inconclusive",
+		"malicious,inconclusive", "inconclusive,malicious", "all", "true", "1":
+		return nil
+	default:
+		return fmt.Errorf("invalid --fail-on %q (want never, malicious, inconclusive, or malicious,inconclusive)", policy)
 	}
 }
 
 func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report.Reporter, opts pipelineOptions) error {
 	if noCache {
 		return fmt.Errorf("--warm-cache cannot be used with --no-cache")
+	}
+	if opts.runAsRoot {
+		return fmt.Errorf("--warm-cache cannot be used with --run-as-root (root scans can mutate system tools)")
 	}
 	if opts.projectPath != "" {
 		return fmt.Errorf("--warm-cache cannot be used for project-staged scans yet")
@@ -797,9 +836,10 @@ func profileForManager(manager string) scanProfile {
 			Image:         nodeImage,
 			RequiredTools: []string{"bash", "strace", "node", "npm", "pnpm", "curl"},
 			SetupCommands: []string{
+				// Pin pnpm major for reproducible sandbox preparation.
 				"command -v corepack >/dev/null 2>&1 && corepack enable >/dev/null 2>&1 || true",
-				"command -v corepack >/dev/null 2>&1 && corepack prepare pnpm@latest --activate >/dev/null 2>&1 || true",
-				"command -v pnpm >/dev/null 2>&1 || npm install -g pnpm@latest >/dev/null 2>&1 || true",
+				"command -v corepack >/dev/null 2>&1 && corepack prepare pnpm@9.15.9 --activate >/dev/null 2>&1 || true",
+				"command -v pnpm >/dev/null 2>&1 || npm install -g pnpm@9.15.9 >/dev/null 2>&1 || true",
 			},
 		}
 	case "bun":
