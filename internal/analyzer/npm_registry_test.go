@@ -3,6 +3,8 @@ package analyzer
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -44,21 +46,26 @@ func TestAnalyzeRegistryPackagesUsesRegistry(t *testing.T) {
 	}
 }
 
-func TestCLIInstallStillCapsAtThree(t *testing.T) {
-	findings := analyzeRegistryBackedSpecs([]string{"a", "b", "c", "d"}, "npm", cliRegistrySpecCap)
-	if len(findings) > 0 {
-		// Without server, specs return INCONCLUSIVE or empty; ensure we only processed 3 by not panicking.
+func TestCLIInstallCoverageLimitFinding(t *testing.T) {
+	// Build more specs than the cap; local paths avoid network.
+	var specs []string
+	for i := 0; i < cliRegistrySpecCap+3; i++ {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"p","version":"1.0.0"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		specs = append(specs, dir)
 	}
-	specs := extractInstallSpecs("npm install a b c d", "npm", []string{"install", "i"})
-	if len(specs) != 4 {
-		t.Fatalf("expected 4 specs extracted")
+	findings := analyzeRegistryBackedSpecs(specs, "npm", cliRegistrySpecCap)
+	found := false
+	for _, f := range findings {
+		if f.ReasonCode == "STATIC_COVERAGE_LIMIT" {
+			found = true
+			break
+		}
 	}
-	capped := specs
-	if len(capped) > cliRegistrySpecCap {
-		capped = capped[:cliRegistrySpecCap]
-	}
-	if len(capped) != 3 {
-		t.Fatalf("expected cap of 3, got %d", len(capped))
+	if !found {
+		t.Fatalf("expected STATIC_COVERAGE_LIMIT when exceeding cap %d, got %#v", cliRegistrySpecCap, findings)
 	}
 }
 
