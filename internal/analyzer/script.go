@@ -1,10 +1,12 @@
 package analyzer
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -13,6 +15,8 @@ import (
 
 	"github.com/KushalMeghani1644/GoAudit-CLI/internal/report"
 )
+
+const maxScriptBytes = 1 << 20 // 1 MiB
 
 var suspiciousScriptPatterns = []struct {
 	code       string
@@ -38,37 +42,45 @@ func AnalyzeRemoteScriptsWithPolicy(seedURLs []string, maxDepth int, allowedDoma
 
 	visited := make(map[string]struct{})
 	var findings []report.Finding
-	client := &http.Client{Timeout: 12 * time.Second}
+	client := newSafeScriptHTTPClient(allowedDomains)
 
-	var crawl func(url string, depth int)
-	crawl = func(url string, depth int) {
+	var crawl func(rawURL string, depth int)
+	crawl = func(rawURL string, depth int) {
 		if depth > maxDepth {
 			return
 		}
-		if _, seen := visited[url]; seen {
+		if _, seen := visited[rawURL]; seen {
 			return
 		}
-		visited[url] = struct{}{}
-		if !domainAllowed(url, allowedDomains) {
+		visited[rawURL] = struct{}{}
+		if !domainAllowed(rawURL, allowedDomains) {
 			findings = append(findings, report.Finding{
 				Severity:   report.SeverityWarning,
 				Type:       "script",
 				ReasonCode: "POLICY_BLOCKED_DOMAIN",
-				Path:       url,
+				Path:       rawURL,
 				Confidence: 75,
 				Evidence:   "Remote script URL blocked by allowlist policy",
 			})
 			return
 		}
 
-		body, contentType, err := fetchScript(client, url)
+		body, contentType, truncated, err := fetchScript(client, rawURL)
 		if err != nil {
+			reason := "INCONCLUSIVE_REMOTE_FETCH"
+			severity := report.SeverityWarning
+			confidence := 35
+			if isSSRFBlockedError(err) {
+				reason = "SSRF_BLOCKED_DESTINATION"
+				severity = report.SeverityWarning
+				confidence = 85
+			}
 			findings = append(findings, report.Finding{
-				Severity:   report.SeverityWarning,
+				Severity:   severity,
 				Type:       "script",
-				ReasonCode: "INCONCLUSIVE_REMOTE_FETCH",
-				Path:       url,
-				Confidence: 35,
+				ReasonCode: reason,
+				Path:       rawURL,
+				Confidence: confidence,
 				Evidence:   err.Error(),
 			})
 			return
@@ -79,13 +91,24 @@ func AnalyzeRemoteScriptsWithPolicy(seedURLs []string, maxDepth int, allowedDoma
 			Severity:   report.SeverityInfo,
 			Type:       "script",
 			ReasonCode: "SCRIPT_FETCHED",
-			Path:       url,
+			Path:       rawURL,
 			Confidence: 80,
 			Evidence:   fmt.Sprintf("sha256=%s; content-type=%s", hash, contentType),
 		})
+		if truncated {
+			findings = append(findings, report.Finding{
+				Severity:   report.SeverityWarning,
+				Type:       "script",
+				ReasonCode: "SCRIPT_TRUNCATED",
+				Path:       rawURL,
+				Confidence: 70,
+				Evidence:   fmt.Sprintf("Remote script truncated at %d bytes for analysis", maxScriptBytes),
+			})
+		}
 
-		isLikelyShell := looksLikeShellScript(body)
-		findings = append(findings, analyzeScriptBody(url, body)...)
+		// Analyze case-insensitively without mutating the stored artifact bytes used for hashing.
+		isLikelyShell := looksLikeShellScript(strings.ToLower(body))
+		findings = append(findings, analyzeScriptBody(rawURL, body)...)
 
 		if isLikelyShell {
 			for _, child := range ExtractURLs(body) {
@@ -100,28 +123,180 @@ func AnalyzeRemoteScriptsWithPolicy(seedURLs []string, maxDepth int, allowedDoma
 	return findings
 }
 
-func fetchScript(client *http.Client, url string) (string, string, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+type ssrfBlockedError struct {
+	msg string
+}
+
+func (e *ssrfBlockedError) Error() string { return e.msg }
+
+func isSSRFBlockedError(err error) bool {
+	_, ok := err.(*ssrfBlockedError)
+	return ok
+}
+
+func newSafeScriptHTTPClient(allowedDomains []string) *http.Client {
+	dialer := &net.Dialer{Timeout: 8 * time.Second}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, &ssrfBlockedError{msg: "invalid dial address: " + address}
+			}
+			if err := assertPublicHost(host); err != nil {
+				return nil, err
+			}
+			// Re-resolve and dial each IP only if public.
+			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			if err != nil {
+				return nil, err
+			}
+			var lastErr error
+			for _, ip := range ips {
+				if err := assertPublicIP(ip.IP); err != nil {
+					lastErr = err
+					continue
+				}
+				addr := net.JoinHostPort(ip.IP.String(), port)
+				conn, err := dialer.DialContext(ctx, network, addr)
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+			}
+			if lastErr == nil {
+				lastErr = &ssrfBlockedError{msg: "no safe addresses for host " + host}
+			}
+			return nil, lastErr
+		},
+		// Force re-check of redirect destinations against allowlist + public IP policy.
+		// CheckRedirect cannot dial, so we only validate the next URL host policy here;
+		// DialContext re-validates IPs for the eventual connection.
+	}
+
+	return &http.Client{
+		Timeout:   12 * time.Second,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return &ssrfBlockedError{msg: "too many redirects while fetching remote script"}
+			}
+			if req.URL == nil {
+				return &ssrfBlockedError{msg: "redirect missing URL"}
+			}
+			if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+				return &ssrfBlockedError{msg: "redirect to non-http(s) scheme blocked"}
+			}
+			if !domainAllowed(req.URL.String(), allowedDomains) {
+				return &ssrfBlockedError{msg: "redirect destination blocked by domain allowlist: " + req.URL.Hostname()}
+			}
+			// Block literal IP hosts that are not public before dial.
+			host := req.URL.Hostname()
+			if ip := net.ParseIP(host); ip != nil {
+				if err := assertPublicIP(ip); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func assertPublicHost(host string) error {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return &ssrfBlockedError{msg: "empty host blocked"}
+	}
+	// Block obvious local hostnames even before resolution.
+	lower := strings.ToLower(host)
+	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") || lower == "metadata.google.internal" {
+		return &ssrfBlockedError{msg: "blocked host: " + host}
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return assertPublicIP(ip)
+	}
+	return nil
+}
+
+func assertPublicIP(ip net.IP) error {
+	if ip == nil {
+		return &ssrfBlockedError{msg: "nil IP blocked"}
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() || ip.IsUnspecified() || ip.IsInterfaceLocalMulticast() {
+		return &ssrfBlockedError{msg: "blocked non-public IP: " + ip.String()}
+	}
+	// Cloud metadata / CGNAT edge cases.
+	if ip4 := ip.To4(); ip4 != nil {
+		// 169.254.0.0/16 link-local already covered; explicit metadata IP.
+		if ip4[0] == 169 && ip4[1] == 254 {
+			return &ssrfBlockedError{msg: "blocked link-local IP: " + ip.String()}
+		}
+		// 100.64.0.0/10 shared address space (CGNAT) — treat as non-public.
+		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+			return &ssrfBlockedError{msg: "blocked shared-address-space IP: " + ip.String()}
+		}
+		// 0.0.0.0/8
+		if ip4[0] == 0 {
+			return &ssrfBlockedError{msg: "blocked IP: " + ip.String()}
+		}
+	}
+	return nil
+}
+
+func fetchScript(client *http.Client, rawURL string) (body string, contentType string, truncated bool, err error) {
+	if err := assertPublicHost(mustHostname(rawURL)); err != nil {
+		// Hostname may be a domain; IP check only applies to literal IPs.
+		// Domain resolution is enforced in DialContext.
+		if net.ParseIP(mustHostname(rawURL)) != nil {
+			return "", "", false, err
+		}
+	}
+
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	req.Header.Set("User-Agent", "goaudit/1.0")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", err
+		// Unwrap transport errors that wrap ssrfBlockedError.
+		if isSSRFBlockedError(err) {
+			return "", "", false, err
+		}
+		var ssrf *ssrfBlockedError
+		if err != nil && strings.Contains(err.Error(), "blocked") {
+			return "", "", false, &ssrfBlockedError{msg: err.Error()}
+		}
+		_ = ssrf
+		return "", "", false, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", "", fmt.Errorf("fetch failed with status %d", resp.StatusCode)
+		return "", "", false, fmt.Errorf("fetch failed with status %d", resp.StatusCode)
 	}
 
-	limited := io.LimitReader(resp.Body, 1<<20)
+	// Read one extra byte to detect truncation without mutating content for hashing.
+	limited := io.LimitReader(resp.Body, maxScriptBytes+1)
 	raw, err := io.ReadAll(limited)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
-	return strings.ToLower(string(raw)), strings.ToLower(resp.Header.Get("Content-Type")), nil
+	if len(raw) > maxScriptBytes {
+		truncated = true
+		raw = raw[:maxScriptBytes]
+	}
+	ct := resp.Header.Get("Content-Type")
+	return string(raw), ct, truncated, nil
+}
+
+func mustHostname(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
 }
 
 func hashContent(content string) string {
@@ -139,6 +314,7 @@ func looksLikeShellScript(body string) bool {
 }
 
 func analyzeScriptBody(url, body string) []report.Finding {
+	// Patterns are already case-insensitive; keep original body for evidence fidelity.
 	var findings []report.Finding
 	for _, s := range suspiciousScriptPatterns {
 		if s.pattern.MatchString(body) {
