@@ -391,6 +391,7 @@ func TestDetectsAccountFileAccess(t *testing.T) {
 	tests := []string{
 		`openat(AT_FDCWD, "/etc/shadow", O_RDONLY) = -1 EACCES (Permission denied)`,
 		`openat(AT_FDCWD, "/etc/passwd", O_WRONLY|O_APPEND) = -1 EACCES (Permission denied)`,
+		`openat(AT_FDCWD, "/etc/shadow", O_RDONLY) = 3`,
 	}
 	for _, line := range tests {
 		t.Run(line, func(t *testing.T) {
@@ -401,6 +402,22 @@ func TestDetectsAccountFileAccess(t *testing.T) {
 			}
 			if f.Type != "privilege" {
 				t.Fatalf("expected privilege type, got %s", f.Type)
+			}
+		})
+	}
+}
+
+func TestPasswdReadOnlyNotFlagged(t *testing.T) {
+	// runuser/getent/libc NSS routinely open /etc/passwd read-only.
+	for _, line := range []string{
+		`openat(AT_FDCWD, "/etc/passwd", O_RDONLY) = 3`,
+		`openat(AT_FDCWD, "/etc/passwd", O_RDONLY|O_CLOEXEC) = 3`,
+		`openat(AT_FDCWD, "/etc/passwd", O_RDONLY) = -1 EACCES (Permission denied)`,
+	} {
+		t.Run(line, func(t *testing.T) {
+			input := "GOAUDIT_RUNTIME_META:phase=target\n" + line
+			if f := findByReason(parse(t, input), "ACCOUNT_FILE_ACCESS"); f != nil {
+				t.Fatalf("did not expect ACCOUNT_FILE_ACCESS for benign passwd read: %+v", f)
 			}
 		})
 	}
@@ -551,16 +568,42 @@ func TestDetectsShellWrappedCrontab(t *testing.T) {
 	}
 }
 
-func TestCredentialReadElevatesNetworkToDataExfil(t *testing.T) {
+func TestRenameDestinationCriticalPath(t *testing.T) {
+	// Source is under /tmp (allowed); destination is cron persistence.
+	input := "GOAUDIT_RUNTIME_META:phase=target\n" +
+		`rename("/tmp/evil", "/etc/cron.d/evil") = 0`
+	f := findByReason(parse(t, input), "PERSISTENCE_WRITE")
+	if f == nil {
+		t.Fatal("expected PERSISTENCE_WRITE for rename destination /etc/cron.d/evil")
+	}
+	if f.Path != "/etc/cron.d/evil" {
+		t.Fatalf("expected destination path, got %q", f.Path)
+	}
+}
+
+func TestRenameat2DestinationCriticalPath(t *testing.T) {
+	input := "GOAUDIT_RUNTIME_META:phase=target\n" +
+		`renameat2(AT_FDCWD, "/tmp/x", AT_FDCWD, "/etc/cron.d/x", 0) = 0`
+	f := findByReason(parse(t, input), "PERSISTENCE_WRITE")
+	if f == nil {
+		t.Fatal("expected PERSISTENCE_WRITE for renameat2 destination")
+	}
+}
+
+func TestCredentialReadWithOutboundIsCorrelativeNotExfil(t *testing.T) {
 	input := "GOAUDIT_RUNTIME_META:phase=target\n" +
 		`openat(AT_FDCWD, "/home/node/.ssh/id_rsa", O_RDONLY) = 3` + "\n" +
 		`connect(3, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr("45.33.32.156")}, 16) = 0`
-	f := findByReason(parse(t, input), "DATA_EXFIL")
-	if f == nil {
-		t.Fatal("expected DATA_EXFIL when credentials read precedes outbound network")
+	findings := parse(t, input)
+	if f := findByReason(findings, "DATA_EXFIL"); f != nil {
+		t.Fatalf("did not expect DATA_EXFIL without observed send, got %+v", f)
 	}
-	if f.Severity != report.SeverityCritical {
-		t.Fatalf("expected critical DATA_EXFIL, got %s", f.Severity)
+	f := findByReason(findings, "CREDENTIAL_READ_WITH_OUTBOUND")
+	if f == nil {
+		t.Fatal("expected CREDENTIAL_READ_WITH_OUTBOUND when credentials read precedes outbound network without send")
+	}
+	if f.Severity != report.SeverityWarning {
+		t.Fatalf("expected warning CREDENTIAL_READ_WITH_OUTBOUND, got %s", f.Severity)
 	}
 }
 
@@ -571,6 +614,50 @@ func TestDetectsSendAfterSuspiciousConnect(t *testing.T) {
 	f := findByReason(parse(t, input), "DATA_EXFIL")
 	if f == nil {
 		t.Fatal("expected DATA_EXFIL for sendto after suspicious connect")
+	}
+}
+
+func TestDetectsChownOnSensitivePath(t *testing.T) {
+	input := "GOAUDIT_RUNTIME_META:phase=target\n" +
+		`chown("/etc/cron.d/evil", 0, 0) = 0`
+	findings := parse(t, input)
+	if findByReason(findings, "OWNERSHIP_CHANGE") == nil {
+		t.Fatal("expected OWNERSHIP_CHANGE for chown of cron path")
+	}
+	if findByReason(findings, "PERSISTENCE_WRITE") == nil {
+		t.Fatal("expected PERSISTENCE_WRITE for chown of cron path")
+	}
+}
+
+func TestDetectsMountOperation(t *testing.T) {
+	input := "GOAUDIT_RUNTIME_META:phase=target\n" +
+		`mount("tmpfs", "/mnt", "tmpfs", 0, NULL) = 0`
+	if findByReason(parse(t, input), "MOUNT_OPERATION") == nil {
+		t.Fatal("expected MOUNT_OPERATION")
+	}
+}
+
+func TestDetectsCapset(t *testing.T) {
+	input := "GOAUDIT_RUNTIME_META:phase=target\n" +
+		`capset({version=_LINUX_CAPABILITY_VERSION_3, pid=0}, {effective=1<<CAP_NET_ADMIN, permitted=1<<CAP_NET_ADMIN, inheritable=0}) = 0`
+	if findByReason(parse(t, input), "CAPABILITY_ESCALATION") == nil {
+		t.Fatal("expected CAPABILITY_ESCALATION for capset")
+	}
+}
+
+func TestDetectsSendfileExfil(t *testing.T) {
+	input := "GOAUDIT_RUNTIME_META:phase=target\n" +
+		`connect(3, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr("45.33.32.156")}, 16) = 0` + "\n" +
+		`sendfile(3, 4, NULL, 4096) = 4096`
+	if findByReason(parse(t, input), "DATA_EXFIL") == nil {
+		t.Fatal("expected DATA_EXFIL for sendfile after suspicious connect")
+	}
+}
+
+func TestProbeLimitationMarker(t *testing.T) {
+	f := findByReason(parse(t, "GOAUDIT_PROBE_LIMITATION:import_and_bin_help_only\n"), "PROBE_LIMITATION")
+	if f == nil {
+		t.Fatal("expected PROBE_LIMITATION finding")
 	}
 }
 

@@ -347,6 +347,18 @@ func behaviorObservations(findings []Finding) []string {
 			add("ld-preload", "During install, the target attempted LD_PRELOAD injection against a privileged helper.")
 		case "ACCOUNT_FILE_ACCESS":
 			add("account-file", "During install, the target accessed Unix account files such as /etc/passwd or /etc/shadow.")
+		case "CREDENTIAL_READ_WITH_OUTBOUND":
+			where := f.Host
+			if where == "" {
+				where = f.IP
+			}
+			if f.Port > 0 && where != "" {
+				where = fmt.Sprintf("%s:%d", where, f.Port)
+			}
+			if where == "" {
+				where = "a non-registry host"
+			}
+			add("credential-outbound", fmt.Sprintf("During install, the target read credential-like files and later connected to %s (data send not proven).", where))
 		case "DATA_EXFIL":
 			where := f.Host
 			if where == "" {

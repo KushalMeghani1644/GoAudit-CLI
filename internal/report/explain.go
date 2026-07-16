@@ -17,6 +17,8 @@ var reasonExplanations = map[string]Explanation{
 	"CAPABILITY_ESCALATION":        {"Linux Capability Escalation", "Attempted to grant Linux capabilities to an executable"},
 	"NAMESPACE_ESCAPE_ATTEMPT":     {"Namespace Escape Attempt", "Executed namespace manipulation tooling such as unshare or nsenter"},
 	"LD_PRELOAD_PRIVILEGE_ATTEMPT": {"LD_PRELOAD Privilege Attempt", "Attempted to inject a preload library into a privileged helper"},
+	"OWNERSHIP_CHANGE":             {"Ownership Change", "Changed ownership of a sensitive path (chown on startup/binaries/account files)"},
+	"MOUNT_OPERATION":              {"Mount Operation", "Performed or attempted mount/umount inside the sandbox"},
 	"ACCOUNT_FILE_ACCESS":          {"Privilege-Sensitive Account File Access", "Accessed /etc/passwd or /etc/shadow, which can expose account data or support privilege escalation"},
 	"SUSPICIOUS_EXEC":              {"Suspicious Process", "Executed a known attack tool (netcat, reverse shell) or ran a binary from /tmp"},
 	"FILELESS_EXEC":                {"Fileless Execution", "Used memfd_create to run code without writing to disk — a common evasion technique"},
@@ -24,7 +26,11 @@ var reasonExplanations = map[string]Explanation{
 	"SYMLINK_SENSITIVE_PATH":       {"Symlink Attack", "Created a symlink targeting sensitive credential files"},
 	"REVERSE_SHELL":                {"Reverse Shell", "Opened an interactive reverse shell connection"},
 	"ENV_THEFT":                    {"Environment Variable Theft", "Read /proc/self/environ to steal CI secrets and environment variables"},
-	"DATA_EXFIL":                   {"Data Exfiltration", "Sent data to a non-registry host after accessing credentials or opening a suspicious outbound connection"},
+	"DATA_EXFIL":                   {"Data Exfiltration", "Observed a network data send (sendto/sendmsg/sendfile/splice) to a non-registry host after a suspicious outbound connection"},
+	"CREDENTIAL_READ_WITH_OUTBOUND": {"Credential Access With Outbound Connection", "Read credential-like files and opened a non-registry connection; data transmission was not proven"},
+	"VERSION_RESOLUTION_APPROXIMATE": {"Approximate Version Analysis", "Static analysis used dist-tags.latest because the install spec was a range or unresolved tag"},
+	"PACKAGE_PARSE_INCOMPLETE":     {"Package Command Parse Incomplete", "Could not extract package specs from a package-manager command (quoting, pipes, or wrappers)"},
+	"PROBE_LIMITATION":             {"Runtime Probe Limitation", "Runtime probe only loads package entrypoints and optional CLI --help; delayed or input-driven paths are not exercised"},
 
 	// Warning — dynamic (strace)
 	"EXTERNAL_NETWORK":          {"Unknown Network Connection", "Connected to a host that isn't a known package registry"},
@@ -78,8 +84,16 @@ var reasonExplanations = map[string]Explanation{
 	"TARGET_COMMAND_NOT_FOUND":          {"Command Not Found", "The target command was not found in the sandbox"},
 	"RUNTIME_METADATA":                  {"Runtime Metadata", "Runtime metadata emitted by the sandbox for diagnostics"},
 	"SCRIPT_FETCHED":                    {"Remote Script Fetched", "A remote script was retrieved for static analysis"},
+	"SCRIPT_TRUNCATED":                  {"Remote Script Truncated", "Remote script exceeded the analysis size limit and was truncated"},
+	"SSRF_BLOCKED_DESTINATION":          {"Unsafe Remote Destination Blocked", "Remote script fetch blocked because the destination resolved to a non-public or disallowed address"},
 	"LOCAL_PACKAGE_REWRITE_UNAVAILABLE": {"Local Package Rewrite Unavailable", "The local package install could not be rewritten to a single package directory; mounting the working directory is refused unless explicitly requested"},
 	"PROJECT_TREE_STAGED":               {"Project Tree Staged", "A secret-redacted project copy, rather than the live host project, was bind-mounted into the sandbox"},
+	"STATIC_COVERAGE_LIMIT":             {"Static Coverage Limit", "Not all package specs were statically analyzed against the registry"},
+	"TRANSITIVE_LOCKFILE_MISSING":       {"Transitive Lockfile Missing", "--include-transitive was set but no supported lockfile was found"},
+	"TRANSITIVE_LOCKFILE_UNSUPPORTED":   {"Transitive Lockfile Unsupported", "A lockfile was found but could not be parsed for transitive dependencies"},
+	"NPM_VERSION_RESOLUTION_APPROXIMATE":  {"Approximate Version Analysis", "Static analysis used dist-tags.latest because the install spec was a range or unresolved tag"},
+	"PNPM_VERSION_RESOLUTION_APPROXIMATE": {"Approximate Version Analysis", "Static analysis used dist-tags.latest because the install spec was a range or unresolved tag"},
+	"BUN_VERSION_RESOLUTION_APPROXIMATE":  {"Approximate Version Analysis", "Static analysis used dist-tags.latest because the install spec was a range or unresolved tag"},
 
 	// Policy
 	"POLICY_BLOCKED_DOMAIN":      {"Blocked Domain", "Remote script URL was blocked by the domain allowlist policy"},
