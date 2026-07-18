@@ -23,15 +23,15 @@ func HasPrepFailure(findings []report.Finding) bool {
 }
 
 var (
-	fsRegex    = regexp.MustCompile(`(?i)(?:open|openat|openat2).*?\"(.*?)\",\s*(?:\{[^}]*flags=)?([A-Z_\|]+)`)
-	netRegex   = regexp.MustCompile(`connect\(.*sa_family=(?:AF_INET|AF_INET6).*?sin6?_port=htons\((\d+)\).*?(?:inet_addr\("(.*?)"\)|inet_pton\([^,]+,\s*"(.*?)")`)
-	execRegex  = regexp.MustCompile(`(?i)execve\(\"(.*?)\",\s*\[(.*?)\]`)
+	fsRegex   = regexp.MustCompile(`(?i)(?:open|openat|openat2).*?\"(.*?)\",\s*(?:\{[^}]*flags=)?([A-Z_\|]+)`)
+	netRegex  = regexp.MustCompile(`connect\(.*sa_family=(?:AF_INET|AF_INET6).*?sin6?_port=htons\((\d+)\).*?(?:inet_addr\("(.*?)"\)|inet_pton\([^,]+,\s*"(.*?)")`)
+	execRegex = regexp.MustCompile(`(?i)execve\(\"(.*?)\",\s*\[(.*?)\]`)
 	// Word boundary avoids matching "link(" inside "symlink(".
-	mutRegex = regexp.MustCompile(`(?i)\b(?:chmod|fchmod|fchmodat|rename|renameat|renameat2|link|linkat|mkdir|mkdirat|unlink|unlinkat|truncate|ftruncate|chown|fchown|lchown|fchownat)\(`)
-	mountRegex = regexp.MustCompile(`(?i)\b(?:mount|umount2)\(`)
+	mutRegex    = regexp.MustCompile(`(?i)\b(?:chmod|fchmod|fchmodat|rename|renameat|renameat2|link|linkat|mkdir|mkdirat|unlink|unlinkat|truncate|ftruncate|chown|fchown|lchown|fchownat)\(`)
+	mountRegex  = regexp.MustCompile(`(?i)\b(?:mount|umount2)\(`)
 	capsetRegex = regexp.MustCompile(`(?i)\bcapset\(`)
-	privRegex  = regexp.MustCompile(`(?i)(setuid|setgid|seteuid|setegid|setreuid|setregid|setresuid|setresgid|setgroups)\(([^)]*)\)`)
-	chmodRegex = regexp.MustCompile(`(?i)(?:chmod|fchmodat)\([^"]*"?([^",)]*)"?\s*,\s*0?([0-7]{3,4})`)
+	privRegex   = regexp.MustCompile(`(?i)(setuid|setgid|seteuid|setegid|setreuid|setregid|setresuid|setresgid|setgroups)\(([^)]*)\)`)
+	chmodRegex  = regexp.MustCompile(`(?i)(?:chmod|fchmodat)\([^"]*"?([^",)]*)"?\s*,\s*0?([0-7]{3,4})`)
 
 	readCriticalPaths  = regexp.MustCompile(`(?i)((?:^|.*?/)\.env(?:\b|$)|.*?/\.ssh/.*?|.*?/\.aws/.*?|.*?/\.kube/.*?|.*?/\.git-credentials|.*?/\.npmrc|.*?id_rsa|^/etc/shadow$)`)
 	writeCriticalPaths = regexp.MustCompile(`(?i)(.*?/\.bashrc|.*?/\.zshrc|.*?/\.profile|.*?/\.ssh/authorized_keys|^/etc/crontab|^/etc/cron\..*|^/usr/local/bin/.*|^/usr/bin/.*|^/etc/passwd$|^/etc/shadow$)`)
