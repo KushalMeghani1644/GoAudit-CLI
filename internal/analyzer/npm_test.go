@@ -49,8 +49,8 @@ func TestSplitPackageSpecAndVersionSelect(t *testing.T) {
 		Versions: map[string]struct {
 			Scripts map[string]string `json:"scripts"`
 		}{
-			"1.0.0": {},
-			"2.0.0": {},
+			"1.0.0":    {},
+			"2.0.0":    {},
 			"3.0.0-rc": {},
 		},
 	}
