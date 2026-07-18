@@ -34,17 +34,17 @@ var scanProjectCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		mode, err := project.ParseUpgradeMode(upgradeMode)
 		if err != nil {
-			report.NewReporter(ciMode, verbose).Fatal(err)
+			report.NewReporter(ciMode, verbose).Fatalf("%v\n", err)
 		}
 
 		proj, err := project.Open(args[0], managerOverride)
 		if err != nil {
-			report.NewReporter(ciMode, verbose).Fatal(err)
+			report.NewReporter(ciMode, verbose).Fatalf("%v\n", err)
 		}
 
 		installCmd, err := project.BuildInstallCommand(proj.Manager, mode)
 		if err != nil {
-			report.NewReporter(ciMode, verbose).Fatal(err)
+			report.NewReporter(ciMode, verbose).Fatalf("%v\n", err)
 		}
 
 		reporter := report.NewReporter(ciMode, verbose)
@@ -65,55 +65,19 @@ var scanProjectCmd = &cobra.Command{
 			reporter.PrintLiveFinding(f)
 		}
 
-		if includeTransitive {
-			found, kind := proj.TransitiveLockfileStatus()
-			if !found {
-				f := report.Finding{
-					Severity:   report.SeverityWarning,
-					Type:       "policy",
-					ReasonCode: "TRANSITIVE_LOCKFILE_MISSING",
-					Path:       proj.Root,
-					Confidence: 80,
-					Evidence:   "--include-transitive requested but no package-lock.json, pnpm-lock.yaml, or bun.lock was found; using direct dependencies only",
-				}
-				findings = append(findings, f)
-				reporter.PrintLiveFinding(f)
-			} else if kind == "bun.lockb" {
-				f := report.Finding{
-					Severity:   report.SeverityWarning,
-					Type:       "policy",
-					ReasonCode: "TRANSITIVE_LOCKFILE_UNSUPPORTED",
-					Path:       kind,
-					Confidence: 75,
-					Evidence:   "Binary bun.lockb is not parsed; use text bun.lock or omit --include-transitive",
-				}
-				findings = append(findings, f)
-				reporter.PrintLiveFinding(f)
-			}
-		}
-
 		deps, err := proj.ListDepsForStatic(includeTransitive)
 		if err != nil {
-			reporter.Fatal(err)
+			reporter.Fatalf("Failed to list dependencies: %v\n", err)
 		}
 
-		hostStaticNetwork := !offlineMode && (networkMode == "auto" || networkMode == "on" || networkMode == "")
-		if networkMode == "off" {
-			hostStaticNetwork = false
+		if !ciMode && len(deps) > 0 {
+			fmt.Printf("Running static registry checks on %d package(s)...\n", len(deps))
 		}
 
-		var registryFindings []report.Finding
-		if hostStaticNetwork {
-			if !ciMode && len(deps) > 0 {
-				fmt.Printf("Running static registry checks on %d package(s)...\n", len(deps))
-			}
-			registryFindings = analyzer.AnalyzeRegistryPackages(deps, proj.Manager)
-			findings = append(findings, registryFindings...)
-			for _, f := range registryFindings {
-				reporter.PrintLiveFinding(f)
-			}
-		} else if !ciMode && len(deps) > 0 {
-			fmt.Println("Skipping registry metadata checks (--offline or --network off)")
+		registryFindings := analyzer.AnalyzeRegistryPackages(deps, proj.Manager)
+		findings = append(findings, registryFindings...)
+		for _, f := range registryFindings {
+			reporter.PrintLiveFinding(f)
 		}
 
 		// Determine which packages to probe at runtime.
@@ -149,7 +113,7 @@ var scanProjectCmd = &cobra.Command{
 		// via /project-ro (bind-mount remains readable for the whole scan).
 		stage, err := project.StageForSandbox(proj.Root, project.StageOptions{FullTree: mountProject})
 		if err != nil {
-			reporter.Fatal(err)
+			reporter.Fatalf("%v\n", err)
 		}
 		defer stage.Cleanup()
 
@@ -171,7 +135,7 @@ var scanProjectCmd = &cobra.Command{
 		profile := profileForManager(proj.Manager)
 		if warmCache {
 			warmSandboxCache(context.Background(), profile, reporter, pipelineOptions{
-				projectPath:     stage.Dir,
+				projectPath:     proj.Root,
 				scanProjectMode: true,
 				runAsRoot:       runAsRoot,
 				probePackages:   probePackages,
@@ -232,7 +196,7 @@ func init() {
 	scanProjectCmd.Flags().StringVar(&probeTimeout, "probe-timeout", "30s", "Maximum time for runtime import probe")
 	scanProjectCmd.Flags().StringVar(&upgradeMode, "upgrade-mode", "refresh-lock", "Upgrade strategy: refresh-lock, ncu, or update")
 	scanProjectCmd.Flags().StringVar(&managerOverride, "manager", "", "Force package manager: npm, pnpm, or bun")
-	scanProjectCmd.Flags().BoolVar(&includeTransitive, "include-transitive", false, "Also registry-check transitive deps from package-lock.json, pnpm-lock.yaml, or bun.lock")
+	scanProjectCmd.Flags().BoolVar(&includeTransitive, "include-transitive", false, "Also registry-check packages from package-lock.json")
 	scanProjectCmd.Flags().BoolVar(&mountProject, "mount-project", false, "Stage full project tree into the sandbox (secret paths redacted); default stages only manifests/lockfiles")
 	scanProjectCmd.Flags().BoolVar(&noCache, "no-cache", false, "Disable sandbox caching for this run (no warm container is stored)")
 	scanProjectCmd.Flags().StringVar(&cacheDir, "cache-dir", "", "Custom directory for sandbox cache (or set GOAUDIT_CACHE_DIR)")

@@ -59,7 +59,7 @@ var scanCmd = &cobra.Command{
 		if projectPath != "" {
 			stage, err := project.StageForSandbox(projectPath, project.StageOptions{FullTree: true})
 			if err != nil {
-				reporter.Fatal(err)
+				reporter.Fatalf("%v\n", err)
 			}
 			defer stage.Cleanup()
 			projectPath = stage.Dir
