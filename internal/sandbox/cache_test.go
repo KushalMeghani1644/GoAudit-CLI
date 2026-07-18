@@ -30,9 +30,9 @@ func TestCacheKey(t *testing.T) {
 
 func TestNetworkModeMatchesPolicy(t *testing.T) {
 	tests := []struct {
-		mode    string
-		net     bool
-		wantOK  bool
+		mode   string
+		net    bool
+		wantOK bool
 	}{
 		// Offline cache key requires NetworkMode none.
 		{"none", false, true},
