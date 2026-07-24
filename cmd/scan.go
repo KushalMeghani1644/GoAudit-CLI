@@ -56,27 +56,37 @@ var scanCmd = &cobra.Command{
 
 		// When mounting a local package (or CWD), stage a secret-redacted copy so
 		// /project-ro never exposes real .env / keys / tokens from the host tree.
+		var cleanupStage func()
 		if projectPath != "" {
 			stage, err := project.StageForSandbox(projectPath, project.StageOptions{FullTree: true})
 			if err != nil {
 				reporter.Fatalf("%v\n", err)
 			}
-			defer stage.Cleanup()
+			cleanupStage = stage.Cleanup
 			projectPath = stage.Dir
+		}
+		cleanup := func() {
+			if cleanupStage != nil {
+				cleanupStage()
+			}
 		}
 
 		if warmCache {
-			warmSandboxCache(context.Background(), profile, reporter, pipelineOptions{
+			err := warmSandboxCache(context.Background(), profile, reporter, pipelineOptions{
 				projectPath:    projectPath,
 				runtimeCommand: runtimeTargetCmd,
 				runAsRoot:      runAsRoot,
 				probePackages:  probePackages,
 				skipProbe:      skipProbe,
 			})
+			cleanup()
+			if err != nil {
+				reporter.Fatalf("%v\n", err)
+			}
 			return
 		}
 
-		runScanPipeline(context.Background(), targetCmd, profile, reporter, pipelineOptions{
+		fail, err := runScanPipeline(context.Background(), targetCmd, profile, reporter, pipelineOptions{
 			projectPath:    projectPath,
 			runtimeCommand: runtimeTargetCmd,
 			priorFindings:  localFindings,
@@ -86,6 +96,13 @@ var scanCmd = &cobra.Command{
 			targetTimeout:  targetTimeout,
 			probeTimeout:   probeTimeout,
 		})
+		cleanup()
+		if err != nil {
+			reporter.Fatalf("%v\n", err)
+		}
+		if fail {
+			os.Exit(1)
+		}
 	},
 }
 

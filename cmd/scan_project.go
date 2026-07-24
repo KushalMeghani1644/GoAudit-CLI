@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/KushalMeghani1644/GoAudit-CLI/internal/analyzer"
@@ -115,8 +116,6 @@ var scanProjectCmd = &cobra.Command{
 		if err != nil {
 			reporter.Fatalf("%v\n", err)
 		}
-		defer stage.Cleanup()
-
 		if mountProject {
 			f := report.Finding{
 				Severity:   report.SeverityWarning,
@@ -134,17 +133,21 @@ var scanProjectCmd = &cobra.Command{
 
 		profile := profileForManager(proj.Manager)
 		if warmCache {
-			warmSandboxCache(context.Background(), profile, reporter, pipelineOptions{
+			err := warmSandboxCache(context.Background(), profile, reporter, pipelineOptions{
 				projectPath:     proj.Root,
 				scanProjectMode: true,
 				runAsRoot:       runAsRoot,
 				probePackages:   probePackages,
 				skipProbe:       skipProbe,
 			})
+			stage.Cleanup()
+			if err != nil {
+				reporter.Fatalf("%v\n", err)
+			}
 			return
 		}
 
-		runScanPipeline(context.Background(), installCmd, profile, reporter, pipelineOptions{
+		fail, err := runScanPipeline(context.Background(), installCmd, profile, reporter, pipelineOptions{
 			projectPath:     stage.Dir,
 			skipStatic:      true,
 			priorFindings:   findings,
@@ -155,6 +158,13 @@ var scanProjectCmd = &cobra.Command{
 			targetTimeout:   targetTimeout,
 			probeTimeout:    probeTimeout,
 		})
+		stage.Cleanup()
+		if err != nil {
+			reporter.Fatalf("%v\n", err)
+		}
+		if fail {
+			os.Exit(1)
+		}
 	},
 }
 
