@@ -39,6 +39,8 @@ var secretPathFragments = []string{
 	".kube",
 	".git-credentials",
 	".npmrc",
+	".yarnrc",
+	".yarnrc.yml",
 	"id_rsa",
 	"id_ed25519",
 	"id_ecdsa",
@@ -105,7 +107,7 @@ func StageForSandbox(projectRoot string, opts StageOptions) (*StageResult, error
 func copyMinimalStage(srcRoot, dstRoot string) error {
 	for _, name := range minimalStageFiles {
 		src := filepath.Join(srcRoot, name)
-		if !fileExists(src) {
+		if isSecretPath(name, name) || !isRegularFile(src) {
 			continue
 		}
 		if err := copyFile(src, filepath.Join(dstRoot, name)); err != nil {
@@ -114,7 +116,7 @@ func copyMinimalStage(srcRoot, dstRoot string) error {
 	}
 	for _, name := range minimalStageDirs {
 		src := filepath.Join(srcRoot, name)
-		info, err := os.Stat(src)
+		info, err := os.Lstat(src)
 		if err != nil || !info.IsDir() {
 			continue
 		}
@@ -123,7 +125,7 @@ func copyMinimalStage(srcRoot, dstRoot string) error {
 		}
 	}
 	// Ensure package.json exists — install commands require it.
-	if !fileExists(filepath.Join(dstRoot, "package.json")) {
+	if !isRegularFile(filepath.Join(dstRoot, "package.json")) {
 		return fmt.Errorf("package.json missing from project root %s", srcRoot)
 	}
 	return nil
@@ -161,8 +163,13 @@ func copyFilteredTree(srcRoot, dstRoot string) error {
 		if d.IsDir() {
 			return os.MkdirAll(dst, 0o755)
 		}
-		if d.Type()&fs.ModeSymlink != 0 {
-			// Do not follow or copy symlinks (can escape the tree).
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			// Do not follow symlinks or copy irregular files; opening a FIFO can
+			// block indefinitely and device files must not enter the sandbox.
 			return nil
 		}
 		return copyFile(path, dst)
@@ -193,6 +200,13 @@ func isSecretPath(rel, base string) bool {
 }
 
 func copyFile(src, dst string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("refusing to copy non-regular file %s", src)
+	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
@@ -202,7 +216,7 @@ func copyFile(src, dst string) error {
 	}
 	defer in.Close()
 
-	info, err := in.Stat()
+	info, err = in.Stat()
 	if err != nil {
 		return err
 	}
@@ -215,4 +229,11 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return out.Close()
+}
+
+// isRegularFile reports whether path names a regular file without following
+// symlinks. Staging must never open a symlink, FIFO, socket, or device file.
+func isRegularFile(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode().IsRegular()
 }

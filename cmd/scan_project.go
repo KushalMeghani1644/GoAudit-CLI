@@ -121,7 +121,7 @@ var scanProjectCmd = &cobra.Command{
 			f := report.Finding{
 				Severity:   report.SeverityWarning,
 				Type:       "policy",
-				ReasonCode: "PROJECT_TREE_MOUNTED",
+				ReasonCode: "PROJECT_TREE_STAGED",
 				Path:       proj.Root,
 				Confidence: 90,
 				Evidence:   "Full project tree staged into sandbox with secret-path redaction; prefer default minimal staging when possible",

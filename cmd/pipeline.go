@@ -240,7 +240,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 				reporter.UpdateProgress(fmt.Sprintf("Preparing sandbox image %s...", profile.Image))
 
 				// Check runc cache before pulling again.
-				if cache != nil {
+				if cache != nil && opts.projectPath == "" {
 					runcCached := cache.Lookup(ctx, "", profile.Name, opts.runAsRoot, networkEnabled)
 					if runcCached != nil && runcCached.Image == profile.Image && !cache.ImageChanged(ctx, runcCached.Image, runcCached.ImageDigest) {
 						reporter.UpdateProgress("Using cached runc sandbox...")
@@ -335,7 +335,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 		}
 
 		usedRuncCache := false
-		if cache != nil {
+		if cache != nil && opts.projectPath == "" {
 			runcCached := cache.Lookup(ctx, "", profile.Name, opts.runAsRoot, networkEnabled)
 			if runcCached != nil && runcCached.Image == profile.Image && !cache.ImageChanged(ctx, runcCached.Image, runcCached.ImageDigest) {
 				reporter.UpdateProgress("Using cached runc sandbox...")
@@ -442,7 +442,7 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 		reporter.Fatalf("--warm-cache cannot be used with --no-cache\n")
 	}
 	if opts.projectPath != "" {
-		reporter.Fatalf("--warm-cache cannot be used for project-mounted scans yet\n")
+		reporter.Fatalf("--warm-cache cannot be used for project-staged scans yet\n")
 	}
 
 	networkEnabled := networkEnabledForProfile(profile.Name, opts.allowNetwork)

@@ -117,10 +117,10 @@ func prepareLocalPackageInstall(targetCmd string) (string, string, []report.Find
 		{
 			Severity:   report.SeverityWarning,
 			Type:       "policy",
-			ReasonCode: "PROJECT_TREE_MOUNTED",
+			ReasonCode: "PROJECT_TREE_STAGED",
 			Path:       wd,
 			Confidence: 90,
-			Evidence:   "Current working directory bind-mounted into sandbox; install scripts can read host files under this tree",
+			Evidence:   "Current working directory was copied into a secret-redacted stage and that stage is bind-mounted into the sandbox",
 		},
 	}
 }

@@ -136,7 +136,7 @@ func TestPrepareLocalPackageInstallMountCwdFallback(t *testing.T) {
 		if f.ReasonCode == "LOCAL_PACKAGE_REWRITE_UNAVAILABLE" {
 			foundRewrite = true
 		}
-		if f.ReasonCode == "PROJECT_TREE_MOUNTED" {
+		if f.ReasonCode == "PROJECT_TREE_STAGED" {
 			foundMount = true
 		}
 	}

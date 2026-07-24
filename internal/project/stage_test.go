@@ -12,6 +12,8 @@ func TestStageForSandboxMinimalExcludesSecrets(t *testing.T) {
 	mustWrite(t, filepath.Join(root, "package-lock.json"), `{"lockfileVersion":3}`)
 	mustWrite(t, filepath.Join(root, ".env"), `SECRET=real`)
 	mustWrite(t, filepath.Join(root, ".npmrc"), `//registry.npmjs.org/:_authToken=real-token`)
+	mustWrite(t, filepath.Join(root, ".yarnrc"), `npmAuthToken: real-token`)
+	mustWrite(t, filepath.Join(root, ".yarnrc.yml"), `npmAuthToken: real-token`)
 	mustWrite(t, filepath.Join(root, "src", "index.js"), `console.log(1)`)
 	mustWrite(t, filepath.Join(root, "patches", "foo.patch"), `diff`)
 
@@ -36,8 +38,40 @@ func TestStageForSandboxMinimalExcludesSecrets(t *testing.T) {
 	if fileExists(filepath.Join(stage.Dir, ".npmrc")) {
 		t.Fatal("minimal stage must not include .npmrc")
 	}
+	for _, name := range []string{".yarnrc", ".yarnrc.yml"} {
+		if fileExists(filepath.Join(stage.Dir, name)) {
+			t.Fatalf("minimal stage must not include %s", name)
+		}
+	}
 	if fileExists(filepath.Join(stage.Dir, "src", "index.js")) {
 		t.Fatal("minimal stage must not include full source tree")
+	}
+}
+
+func TestStageForSandboxMinimalSkipsSymlinkedInputs(t *testing.T) {
+	root := t.TempDir()
+	external := t.TempDir()
+	mustWrite(t, filepath.Join(root, "package.json"), `{"name":"app"}`)
+	mustWrite(t, filepath.Join(external, "package-lock.json"), `{"lockfileVersion":3}`)
+	mustWrite(t, filepath.Join(external, "escape.patch"), `diff`)
+	if err := os.Symlink(filepath.Join(external, "package-lock.json"), filepath.Join(root, "package-lock.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, filepath.Join(root, "patches")); err != nil {
+		t.Fatal(err)
+	}
+
+	stage, err := StageForSandbox(root, StageOptions{FullTree: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stage.Cleanup()
+
+	if fileExists(filepath.Join(stage.Dir, "package-lock.json")) {
+		t.Fatal("minimal stage must not follow lockfile symlinks")
+	}
+	if fileExists(filepath.Join(stage.Dir, "patches", "escape.patch")) {
+		t.Fatal("minimal stage must not follow directory symlinks")
 	}
 }
 
@@ -94,6 +128,8 @@ func TestIsSecretPath(t *testing.T) {
 		{"src/index.js", "index.js", false},
 		{".ssh/id_rsa", "id_rsa", true},
 		{".aws/credentials", "credentials", true},
+		{".yarnrc", ".yarnrc", true},
+		{".yarnrc.yml", ".yarnrc.yml", true},
 		{"certs/server.pem", "server.pem", true},
 		{"readme.md", "readme.md", false},
 	}
