@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/KushalMeghani1644/GoAudit-CLI/internal/analyzer"
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/project"
 	"github.com/KushalMeghani1644/GoAudit-CLI/internal/report"
 	"github.com/spf13/cobra"
 )
@@ -27,6 +28,7 @@ var (
 	targetTimeout  string
 	probeTimeout   string
 	failOn         string
+	mountCwd       bool
 )
 
 type scanProfile struct {
@@ -52,18 +54,39 @@ var scanCmd = &cobra.Command{
 
 		runtimeTargetCmd, projectPath, localFindings := prepareLocalPackageInstall(targetCmd)
 
+		// When mounting a local package (or CWD), stage a secret-redacted copy so
+		// /project-ro never exposes real .env / keys / tokens from the host tree.
+		var cleanupStage func()
+		if projectPath != "" {
+			stage, err := project.StageForSandbox(projectPath, project.StageOptions{FullTree: true})
+			if err != nil {
+				reporter.Fatalf("%v\n", err)
+			}
+			cleanupStage = stage.Cleanup
+			projectPath = stage.Dir
+		}
+		cleanup := func() {
+			if cleanupStage != nil {
+				cleanupStage()
+			}
+		}
+
 		if warmCache {
-			warmSandboxCache(context.Background(), profile, reporter, pipelineOptions{
+			err := warmSandboxCache(context.Background(), profile, reporter, pipelineOptions{
 				projectPath:    projectPath,
 				runtimeCommand: runtimeTargetCmd,
 				runAsRoot:      runAsRoot,
 				probePackages:  probePackages,
 				skipProbe:      skipProbe,
 			})
+			cleanup()
+			if err != nil {
+				reporter.Fatalf("%v\n", err)
+			}
 			return
 		}
 
-		runScanPipeline(context.Background(), targetCmd, profile, reporter, pipelineOptions{
+		fail, err := runScanPipeline(context.Background(), targetCmd, profile, reporter, pipelineOptions{
 			projectPath:    projectPath,
 			runtimeCommand: runtimeTargetCmd,
 			priorFindings:  localFindings,
@@ -73,6 +96,13 @@ var scanCmd = &cobra.Command{
 			targetTimeout:  targetTimeout,
 			probeTimeout:   probeTimeout,
 		})
+		cleanup()
+		if err != nil {
+			reporter.Fatalf("%v\n", err)
+		}
+		if fail {
+			os.Exit(1)
+		}
 	},
 }
 
@@ -83,11 +113,33 @@ func prepareLocalPackageInstall(targetCmd string) (string, string, []report.Find
 	if rewritten, path, ok := analyzer.RewriteSingleLocalPackageInstall(targetCmd); ok {
 		return rewritten, path, nil
 	}
+	// Multi/unsupported local specs: refuse CWD mount by default so install scripts
+	// cannot read arbitrary host secrets. Opt in with --mount-cwd.
+	if !mountCwd {
+		return targetCmd, "", []report.Finding{{
+			Severity:   report.SeverityWarning,
+			Type:       "runtime",
+			ReasonCode: "LOCAL_PACKAGE_REWRITE_UNAVAILABLE",
+			Path:       targetCmd,
+			Confidence: 80,
+			Evidence:   "local package install contains multiple or unsupported local path specs; refusing to mount the working directory (pass --mount-cwd to override)",
+		}}
+	}
 	wd, err := os.Getwd()
 	if err != nil {
 		return targetCmd, "", []report.Finding{localPackageRewriteUnavailableFinding(targetCmd, err.Error())}
 	}
-	return targetCmd, wd, []report.Finding{localPackageRewriteUnavailableFinding(targetCmd, "local package install contains multiple or unsupported local path specs; mounted the current working directory without rewriting the command")}
+	return targetCmd, wd, []report.Finding{
+		localPackageRewriteUnavailableFinding(targetCmd, "local package install contains multiple or unsupported local path specs; mounted the current working directory without rewriting the command (--mount-cwd)"),
+		{
+			Severity:   report.SeverityWarning,
+			Type:       "policy",
+			ReasonCode: "PROJECT_TREE_STAGED",
+			Path:       wd,
+			Confidence: 90,
+			Evidence:   "Current working directory was copied into a secret-redacted stage and that stage is bind-mounted into the sandbox",
+		},
+	}
 }
 
 func localPackageRewriteUnavailableFinding(targetCmd, evidence string) report.Finding {
@@ -136,5 +188,6 @@ func init() {
 	scanCmd.Flags().StringVar(&targetTimeout, "timeout", "", "Maximum time for the install/target command (default: profile-based)")
 	scanCmd.Flags().StringVar(&probeTimeout, "probe-timeout", "30s", "Maximum time for runtime import probe")
 	scanCmd.Flags().StringVar(&failOn, "fail-on", "never", "Exit non-zero on: never, malicious, inconclusive, or malicious,inconclusive")
+	scanCmd.Flags().BoolVar(&mountCwd, "mount-cwd", false, "Allow mounting the current working directory for multi-local package installs (secret-redacted stage)")
 	rootCmd.AddCommand(scanCmd)
 }

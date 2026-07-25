@@ -78,7 +78,8 @@ var reasonExplanations = map[string]Explanation{
 	"TARGET_COMMAND_NOT_FOUND":          {"Command Not Found", "The target command was not found in the sandbox"},
 	"RUNTIME_METADATA":                  {"Runtime Metadata", "Runtime metadata emitted by the sandbox for diagnostics"},
 	"SCRIPT_FETCHED":                    {"Remote Script Fetched", "A remote script was retrieved for static analysis"},
-	"LOCAL_PACKAGE_REWRITE_UNAVAILABLE": {"Local Package Mount Fallback", "The local package install could not be rewritten to a single package directory, so the current working directory was mounted instead"},
+	"LOCAL_PACKAGE_REWRITE_UNAVAILABLE": {"Local Package Rewrite Unavailable", "The local package install could not be rewritten to a single package directory; mounting the working directory is refused unless explicitly requested"},
+	"PROJECT_TREE_STAGED":               {"Project Tree Staged", "A secret-redacted project copy, rather than the live host project, was bind-mounted into the sandbox"},
 
 	// Policy
 	"POLICY_BLOCKED_DOMAIN":      {"Blocked Domain", "Remote script URL was blocked by the domain allowlist policy"},

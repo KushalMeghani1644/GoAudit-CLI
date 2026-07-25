@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/KushalMeghani1644/GoAudit-CLI/internal/analyzer"
@@ -16,6 +17,7 @@ var (
 	managerOverride   string
 	includeTransitive bool
 	probeAll          bool
+	mountProject      bool
 	// failOn is defined in scan.go (shared across scan commands).
 )
 
@@ -108,20 +110,45 @@ var scanProjectCmd = &cobra.Command{
 			}
 		}
 
+		// Stage a sanitized tree so install scripts cannot read real project secrets
+		// via /project-ro (bind-mount remains readable for the whole scan).
+		stage, err := project.StageForSandbox(proj.Root, project.StageOptions{FullTree: mountProject})
+		if err != nil {
+			reporter.Fatalf("%v\n", err)
+		}
+		if mountProject {
+			f := report.Finding{
+				Severity:   report.SeverityWarning,
+				Type:       "policy",
+				ReasonCode: "PROJECT_TREE_STAGED",
+				Path:       proj.Root,
+				Confidence: 90,
+				Evidence:   "Full project tree staged into sandbox with secret-path redaction; prefer default minimal staging when possible",
+			}
+			findings = append(findings, f)
+			reporter.PrintLiveFinding(f)
+		} else if !ciMode {
+			fmt.Println("Staging minimal install inputs (package.json/lockfiles); use --mount-project for full tree with secret redaction")
+		}
+
 		profile := profileForManager(proj.Manager)
 		if warmCache {
-			warmSandboxCache(context.Background(), profile, reporter, pipelineOptions{
+			err := warmSandboxCache(context.Background(), profile, reporter, pipelineOptions{
 				projectPath:     proj.Root,
 				scanProjectMode: true,
 				runAsRoot:       runAsRoot,
 				probePackages:   probePackages,
 				skipProbe:       skipProbe,
 			})
+			stage.Cleanup()
+			if err != nil {
+				reporter.Fatalf("%v\n", err)
+			}
 			return
 		}
 
-		runScanPipeline(context.Background(), installCmd, profile, reporter, pipelineOptions{
-			projectPath:     proj.Root,
+		fail, err := runScanPipeline(context.Background(), installCmd, profile, reporter, pipelineOptions{
+			projectPath:     stage.Dir,
 			skipStatic:      true,
 			priorFindings:   findings,
 			scanProjectMode: true,
@@ -131,6 +158,13 @@ var scanProjectCmd = &cobra.Command{
 			targetTimeout:   targetTimeout,
 			probeTimeout:    probeTimeout,
 		})
+		stage.Cleanup()
+		if err != nil {
+			reporter.Fatalf("%v\n", err)
+		}
+		if fail {
+			os.Exit(1)
+		}
 	},
 }
 
@@ -173,6 +207,7 @@ func init() {
 	scanProjectCmd.Flags().StringVar(&upgradeMode, "upgrade-mode", "refresh-lock", "Upgrade strategy: refresh-lock, ncu, or update")
 	scanProjectCmd.Flags().StringVar(&managerOverride, "manager", "", "Force package manager: npm, pnpm, or bun")
 	scanProjectCmd.Flags().BoolVar(&includeTransitive, "include-transitive", false, "Also registry-check packages from package-lock.json")
+	scanProjectCmd.Flags().BoolVar(&mountProject, "mount-project", false, "Stage full project tree into the sandbox (secret paths redacted); default stages only manifests/lockfiles")
 	scanProjectCmd.Flags().BoolVar(&noCache, "no-cache", false, "Disable sandbox caching for this run (no warm container is stored)")
 	scanProjectCmd.Flags().StringVar(&cacheDir, "cache-dir", "", "Custom directory for sandbox cache (or set GOAUDIT_CACHE_DIR)")
 	scanProjectCmd.Flags().StringVar(&failOn, "fail-on", "never", "Exit non-zero on: never, malicious, inconclusive, or malicious,inconclusive")

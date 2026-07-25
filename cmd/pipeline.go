@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"strings"
 
 	"github.com/KushalMeghani1644/GoAudit-CLI/internal/analyzer"
@@ -67,7 +66,10 @@ func networkEnabledForProfile(profileName string, allowNetwork bool) bool {
 	return allowNetwork
 }
 
-func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile, reporter *report.Reporter, opts pipelineOptions) {
+// runScanPipeline reports whether the configured verdict policy requires a
+// non-zero exit. It never exits itself so callers can release staged project
+// trees before terminating the process.
+func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile, reporter *report.Reporter, opts pipelineOptions) (bool, error) {
 	runTargetCmd := targetCmd
 	if strings.TrimSpace(opts.runtimeCommand) != "" {
 		runTargetCmd = opts.runtimeCommand
@@ -128,7 +130,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 	})
 	if err != nil {
 		reporter.StopProgress()
-		reporter.Fatalf("Failed to initialize sandbox: %v\n", err)
+		return false, fmt.Errorf("failed to initialize sandbox: %w", err)
 	}
 
 	if shouldUsePublishedNodeSandbox(s.Runtime(), profile) {
@@ -240,7 +242,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 				reporter.UpdateProgress(fmt.Sprintf("Preparing sandbox image %s...", profile.Image))
 
 				// Check runc cache before pulling again.
-				if cache != nil {
+				if cache != nil && opts.projectPath == "" {
 					runcCached := cache.Lookup(ctx, "", profile.Name, opts.runAsRoot, networkEnabled)
 					if runcCached != nil && runcCached.Image == profile.Image && !cache.ImageChanged(ctx, runcCached.Image, runcCached.ImageDigest) {
 						reporter.UpdateProgress("Using cached runc sandbox...")
@@ -255,12 +257,12 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 				if !usedCache {
 					if _, err := s.EnsureImage(ctx); err != nil {
 						reporter.StopProgress()
-						reporter.Fatalf("Failed to prepare image after runc fallback: %v\n", err)
+						return false, fmt.Errorf("failed to prepare image after runc fallback: %w", err)
 					}
 				}
 			} else {
 				reporter.StopProgress()
-				reporter.Fatalf("Failed to prepare image: %v\n", err)
+				return false, fmt.Errorf("failed to prepare image: %w", err)
 			}
 		}
 	}
@@ -297,13 +299,13 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 			// Pull image and do a cold run.
 			if _, err := s.EnsureImage(ctx); err != nil {
 				reporter.StopProgress()
-				reporter.Fatalf("Failed to prepare image: %v\n", err)
+				return false, fmt.Errorf("failed to prepare image: %w", err)
 			}
 			dynamicFindings, sandboxRuntime, traceHealth, err = runSandboxAndParse(ctx, s, profile, runTargetCmd, probeScript, opts, registryIPs, reporter)
 			if err != nil {
 				s.Cleanup(ctx, false)
 				reporter.StopProgress()
-				reporter.Fatalf("Failed to run command: %v\n", err)
+				return false, fmt.Errorf("failed to run command: %w", err)
 			}
 		}
 	} else {
@@ -311,7 +313,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 		if err != nil {
 			s.Cleanup(ctx, false)
 			reporter.StopProgress()
-			reporter.Fatalf("Failed to run command: %v\n", err)
+			return false, fmt.Errorf("failed to run command: %w", err)
 		}
 	}
 
@@ -335,7 +337,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 		}
 
 		usedRuncCache := false
-		if cache != nil {
+		if cache != nil && opts.projectPath == "" {
 			runcCached := cache.Lookup(ctx, "", profile.Name, opts.runAsRoot, networkEnabled)
 			if runcCached != nil && runcCached.Image == profile.Image && !cache.ImageChanged(ctx, runcCached.Image, runcCached.ImageDigest) {
 				reporter.UpdateProgress("Using cached runc sandbox...")
@@ -353,7 +355,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 			if _, err := s.EnsureImage(ctx); err != nil {
 				s.Cleanup(ctx, false)
 				reporter.StopProgress()
-				reporter.Fatalf("Failed to prepare image after runc fallback: %v\n", err)
+				return false, fmt.Errorf("failed to prepare image after runc fallback: %w", err)
 			}
 			dynamicFindings, sandboxRuntime, traceHealth, err = runSandboxAndParse(ctx, s, profile, runTargetCmd, probeScript, opts, registryIPs, reporter)
 			usedCache = false
@@ -361,7 +363,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 		if err != nil {
 			s.Cleanup(ctx, false)
 			reporter.StopProgress()
-			reporter.Fatalf("Failed to run command after runc fallback: %v\n", err)
+			return false, fmt.Errorf("failed to run command after runc fallback: %w", err)
 		}
 	}
 
@@ -415,9 +417,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 		Dynamic:                  dynamicMetaFromTraceHealth(traceHealth),
 	}
 	verdict, _ := reporter.Report(findings, meta)
-	if shouldFailOnVerdict(failOn, verdict) {
-		os.Exit(1)
-	}
+	return shouldFailOnVerdict(failOn, verdict), nil
 }
 
 func shouldFailOnVerdict(policy string, verdict report.Verdict) bool {
@@ -437,12 +437,12 @@ func shouldFailOnVerdict(policy string, verdict report.Verdict) bool {
 	}
 }
 
-func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report.Reporter, opts pipelineOptions) {
+func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report.Reporter, opts pipelineOptions) error {
 	if noCache {
-		reporter.Fatalf("--warm-cache cannot be used with --no-cache\n")
+		return fmt.Errorf("--warm-cache cannot be used with --no-cache")
 	}
 	if opts.projectPath != "" {
-		reporter.Fatalf("--warm-cache cannot be used for project-mounted scans yet\n")
+		return fmt.Errorf("--warm-cache cannot be used for project-staged scans yet")
 	}
 
 	networkEnabled := networkEnabledForProfile(profile.Name, opts.allowNetwork)
@@ -452,7 +452,7 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 	cache, err := sandbox.NewCacheManager(cacheDir)
 	if err != nil {
 		reporter.StopProgress()
-		reporter.Fatalf("Failed to initialize cache: %v\n", err)
+		return fmt.Errorf("failed to initialize cache: %w", err)
 	}
 	defer cache.Close()
 
@@ -462,7 +462,7 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 	})
 	if err != nil {
 		reporter.StopProgress()
-		reporter.Fatalf("Failed to initialize sandbox: %v\n", err)
+		return fmt.Errorf("failed to initialize sandbox: %w", err)
 	}
 
 	if shouldUsePublishedNodeSandbox(s.Runtime(), profile) {
@@ -495,7 +495,7 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 				}
 				fmt.Printf("Sandbox cache is already warm for %s (%s).\n", profile.Name, rt)
 			}
-			return
+			return nil
 		}
 	}
 
@@ -515,15 +515,15 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 				if !ciMode {
 					fmt.Printf("Sandbox cache is already warm for %s (runc).\n", profile.Name)
 				}
-				return
+				return nil
 			}
 			if _, err := s.EnsureImage(ctx); err != nil {
 				reporter.StopProgress()
-				reporter.Fatalf("Failed to prepare image after runc fallback: %v\n", err)
+				return fmt.Errorf("failed to prepare image after runc fallback: %w", err)
 			}
 		} else {
 			reporter.StopProgress()
-			reporter.Fatalf("Failed to prepare image: %v\n", err)
+			return fmt.Errorf("failed to prepare image: %w", err)
 		}
 	}
 
@@ -531,7 +531,7 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 	if err := s.PrepareWarm(ctx, profile.Name, s.Image(), profile.RequiredTools, profile.SetupCommands); err != nil {
 		s.Cleanup(ctx, false)
 		reporter.StopProgress()
-		reporter.Fatalf("Failed to warm cache: %v\n", err)
+		return fmt.Errorf("failed to warm cache: %w", err)
 	}
 	digest, digestErr := s.InspectImageDigest(ctx, s.Image())
 	if digestErr != nil {
@@ -540,7 +540,7 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 	if err := cache.Store(ctx, s.Runtime(), profile.Name, opts.runAsRoot, networkEnabled, s.ContainerID(), s.Image(), digest); err != nil {
 		s.Cleanup(ctx, false)
 		reporter.StopProgress()
-		reporter.Fatalf("Failed to save cache: %v\n", err)
+		return fmt.Errorf("failed to save cache: %w", err)
 	}
 
 	reporter.StopProgress()
@@ -551,6 +551,7 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 		}
 		fmt.Printf("Warmed sandbox cache for %s (%s).\n", profile.Name, rt)
 	}
+	return nil
 }
 
 func runSandboxAndParse(
