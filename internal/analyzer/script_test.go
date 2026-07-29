@@ -59,35 +59,30 @@ func TestHashContentUsesOriginalBytesNotLowercased(t *testing.T) {
 }
 
 func TestFetchScriptBlocksLoopbackRedirect(t *testing.T) {
-	// Public-looking first hop that redirects to loopback should be blocked.
 	loop := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("secret"))
 	}))
 	defer loop.Close()
 
-	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, loop.URL, http.StatusFound)
-	}))
-	defer redir.Close()
+	client := newSafeScriptHTTPClient(nil)
+	redirectTarget, err := http.NewRequest(http.MethodGet, loop.URL, nil)
+	if err != nil {
+		t.Fatalf("create redirect request: %v", err)
+	}
+	if err := client.CheckRedirect(redirectTarget, nil); !isSSRFBlockedError(err) {
+		t.Fatalf("expected redirect destination to be blocked, got %v", err)
+	}
 
-	findings := AnalyzeRemoteScriptsWithPolicy([]string{redir.URL}, 1, nil)
-	blocked := false
-	for _, f := range findings {
-		if f.ReasonCode == "SSRF_BLOCKED_DESTINATION" || (f.ReasonCode == "INCONCLUSIVE_REMOTE_FETCH" && strings.Contains(f.Evidence, "blocked")) {
-			blocked = true
-			break
-		}
+	if _, _, _, err := fetchScript(client, loop.URL); !isSSRFBlockedError(err) {
+		t.Fatalf("expected first-hop loopback fetch to be blocked, got %v", err)
 	}
-	// httptest both are loopback; either initial dial or redirect should fail closed.
-	if !blocked {
-		// Initial URL itself is loopback, so SSRF block is expected on first hop.
-		for _, f := range findings {
-			if f.ReasonCode == "SSRF_BLOCKED_DESTINATION" {
-				blocked = true
-			}
-		}
-	}
-	if !blocked {
-		t.Fatalf("expected SSRF block for loopback fetch, findings=%+v", findings)
+}
+
+func TestScriptFetchedMarksTruncatedDigestAsPrefix(t *testing.T) {
+	// A truncated body cannot have the upstream script's complete SHA-256.
+	body := strings.Repeat("x", maxScriptBytes)
+	evidence := scriptFetchEvidence(body, "text/plain", true)
+	if !strings.HasPrefix(evidence, "sha256-prefix=") {
+		t.Fatalf("expected truncated digest label, got %q", evidence)
 	}
 }

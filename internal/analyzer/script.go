@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -86,14 +87,13 @@ func AnalyzeRemoteScriptsWithPolicy(seedURLs []string, maxDepth int, allowedDoma
 			return
 		}
 
-		hash := hashContent(body)
 		findings = append(findings, report.Finding{
 			Severity:   report.SeverityInfo,
 			Type:       "script",
 			ReasonCode: "SCRIPT_FETCHED",
 			Path:       rawURL,
 			Confidence: 80,
-			Evidence:   fmt.Sprintf("sha256=%s; content-type=%s", hash, contentType),
+			Evidence:   scriptFetchEvidence(body, contentType, truncated),
 		})
 		if truncated {
 			findings = append(findings, report.Finding{
@@ -130,14 +130,16 @@ type ssrfBlockedError struct {
 func (e *ssrfBlockedError) Error() string { return e.msg }
 
 func isSSRFBlockedError(err error) bool {
-	_, ok := err.(*ssrfBlockedError)
-	return ok
+	var blocked *ssrfBlockedError
+	return errors.As(err, &blocked)
 }
 
 func newSafeScriptHTTPClient(allowedDomains []string) *http.Client {
 	dialer := &net.Dialer{Timeout: 8 * time.Second}
 	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		// Proxies would receive the request and could connect to a private target
+		// after DialContext has only validated the proxy address.
+		Proxy: nil,
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			host, port, err := net.SplitHostPort(address)
 			if err != nil {
@@ -253,7 +255,9 @@ func fetchScript(client *http.Client, rawURL string) (body string, contentType s
 		}
 	}
 
-	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return "", "", false, err
 	}
@@ -261,18 +265,12 @@ func fetchScript(client *http.Client, rawURL string) (body string, contentType s
 
 	resp, err := client.Do(req)
 	if err != nil {
-		// Unwrap transport errors that wrap ssrfBlockedError.
 		if isSSRFBlockedError(err) {
 			return "", "", false, err
 		}
-		var ssrf *ssrfBlockedError
-		if err != nil && strings.Contains(err.Error(), "blocked") {
-			return "", "", false, &ssrfBlockedError{msg: err.Error()}
-		}
-		_ = ssrf
 		return "", "", false, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", "", false, fmt.Errorf("fetch failed with status %d", resp.StatusCode)
 	}
@@ -302,6 +300,14 @@ func mustHostname(rawURL string) string {
 func hashContent(content string) string {
 	sum := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(sum[:])
+}
+
+func scriptFetchEvidence(body, contentType string, truncated bool) string {
+	hashLabel := "sha256"
+	if truncated {
+		hashLabel = "sha256-prefix"
+	}
+	return fmt.Sprintf("%s=%s; content-type=%s", hashLabel, hashContent(body), contentType)
 }
 
 func looksLikeShellScript(body string) bool {
