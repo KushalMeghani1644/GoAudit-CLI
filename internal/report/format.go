@@ -341,6 +341,8 @@ func behaviorObservations(findings []Finding) []string {
 			add("suid-sgid", "During install, the target attempted to set SUID or SGID permission bits for elevated future execution.")
 		case "CAPABILITY_ESCALATION":
 			add("capability", "During install, the target attempted to grant Linux capabilities to an executable.")
+		case "CAPABILITY_CHANGE":
+			add("capability-change", "During install, the target used capset to modify process capabilities without a proven raise.")
 		case "NAMESPACE_ESCAPE_ATTEMPT":
 			add("namespace", "During install, the target invoked namespace tooling commonly used for sandbox or container escape attempts.")
 		case "LD_PRELOAD_PRIVILEGE_ATTEMPT":

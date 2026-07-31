@@ -103,8 +103,6 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 	targetPhase := false
 	health := TraceHealth{ProbeExpected: opts.ProbeExpected}
 	seen := map[string]bool{} // deduplication key
-	sawSuspiciousOutbound := false
-	lastSuspicious := observedConnection{}
 	suspiciousByFD := map[string]observedConnection{}
 
 	if opts.KnownRegistryIPs == nil {
@@ -166,14 +164,12 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 				probePhase = true
 				targetPhase = true
 				health.ProbePhaseObserved = true
-				sawSuspiciousOutbound = false
-				lastSuspicious = observedConnection{}
+				suspiciousByFD = map[string]observedConnection{}
 			}
 			if strings.Contains(meta, "phase=target") {
 				targetPhase = true
 				health.TargetPhaseObserved = true
-				sawSuspiciousOutbound = false
-				lastSuspicious = observedConnection{}
+				suspiciousByFD = map[string]observedConnection{}
 			}
 			emit(report.Finding{Severity: report.SeverityInfo, Type: "runtime", ReasonCode: "RUNTIME_METADATA", Path: "sandbox", Confidence: 90, Evidence: meta})
 			continue
@@ -416,20 +412,21 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 		}
 
 		// --- capset ---
+		// capset can raise, retain, drop, or clear capabilities. A syscall trace
+		// has no prior capability set, so even a non-zero result cannot prove an
+		// increase. Keep this as a neutral capability-change warning.
 		if capsetRegex.MatchString(line) {
 			failed := strings.Contains(line, "= -1 ")
 			key := "CAPSET:" + phaseTag(probePhase, targetPhase)
 			if !seen[key] {
 				seen[key] = true
-				sev := report.SeverityCritical
-				conf := 92
-				ev := "capset syscall used to modify process capabilities"
+				conf := 70
+				ev := "capset used to modify process capabilities without a proven increase"
 				if failed {
-					sev = report.SeverityWarning
-					conf = 78
+					conf = 60
 					ev = "capset capability change failed in sandbox"
 				}
-				emit(report.Finding{Severity: sev, Type: "privilege", ReasonCode: "CAPABILITY_ESCALATION", Path: line, Confidence: conf, Evidence: ev})
+				emit(report.Finding{Severity: report.SeverityWarning, Type: "privilege", ReasonCode: "CAPABILITY_CHANGE", Path: line, Confidence: conf, Evidence: ev})
 			}
 			continue
 		}
@@ -510,12 +507,12 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 		}
 
 		// --- Network send after suspicious outbound connect ---
+		// Require a successful positive-byte send on the FD that was previously
+		// connected to a suspicious host. Do not fall back to lastSuspicious for
+		// unrelated or failed send-like syscalls.
 		if sendFD, ok := parseSendFD(line); ok && targetPhase {
 			conn, matchedFD := suspiciousByFD[sendFD]
-			if !matchedFD && sawSuspiciousOutbound {
-				conn = lastSuspicious
-			}
-			if !matchedFD && !sawSuspiciousOutbound {
+			if !matchedFD {
 				continue
 			}
 			key := "DATA_EXFIL_SEND:" + conn.IP + ":" + strconv.Itoa(conn.Port) + ":" + phaseTag(probePhase, targetPhase)
@@ -567,27 +564,24 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 				host = registryHost
 				reasonCode = "EXTERNAL_NETWORK_REGISTRY"
 				severity = report.SeverityInfo
-				sawSuspiciousOutbound = false
 			} else if ipStr == "169.254.169.254" {
 				host = "cloud metadata service"
 				reasonCode = "CLOUD_METADATA_ACCESS"
 				severity = report.SeverityCritical
-				sawSuspiciousOutbound = true
 			} else if ip != nil && (ip.IsPrivate() || ip.IsLinkLocalUnicast()) {
 				reasonCode = "INTERNAL_NETWORK"
 				severity = report.SeverityWarning
-				sawSuspiciousOutbound = true
 			} else {
-				sawSuspiciousOutbound = true
 				if names, err := net.LookupAddr(ipStr); err == nil && len(names) > 0 {
 					host = strings.TrimSuffix(names[0], ".")
 				}
 			}
 			fd := parseConnectFD(line)
-			if sawSuspiciousOutbound && reasonCode != "EXTERNAL_NETWORK_REGISTRY" {
-				lastSuspicious = observedConnection{Host: host, IP: ipStr, Port: port}
-				if fd != "" {
-					suspiciousByFD[fd] = lastSuspicious
+			if reasonCode != "EXTERNAL_NETWORK_REGISTRY" {
+				// A failed connect does not establish an output FD. It can still be
+				// reported as network activity, but cannot support DATA_EXFIL.
+				if result, ok := parseSyscallResult(line); ok && result == 0 && fd != "" {
+					suspiciousByFD[fd] = observedConnection{Host: host, IP: ipStr, Port: port}
 				}
 			}
 
@@ -653,7 +647,14 @@ func parseConnectFD(line string) string {
 
 func parseSendFD(line string) (string, bool) {
 	line = strings.TrimSpace(line)
+	// Only successful transfers with a positive result count as exfil evidence.
+	// Failed (= -1) and zero-byte (= 0) sends must not produce DATA_EXFIL.
+	if result, ok := parseSyscallResult(line); !ok || result <= 0 {
+		return "", false
+	}
+
 	prefix := ""
+	isSplice := false
 	switch {
 	case strings.HasPrefix(line, "sendto("):
 		prefix = "sendto("
@@ -665,19 +666,81 @@ func parseSendFD(line string) (string, bool) {
 		// sendfile(out_fd, in_fd, ...) — out_fd is the network destination side.
 		prefix = "sendfile("
 	case strings.HasPrefix(line, "splice("):
-		// splice(fd_in, ..., fd_out, ...) — first fd is often the source; if either
-		// matches a suspicious connect fd we still flag via sawSuspiciousOutbound fallback.
+		// splice(fd_in, off_in, fd_out, ...) — fd_out is the destination side.
 		prefix = "splice("
+		isSplice = true
 	default:
 		return "", false
 	}
 	rest := strings.TrimPrefix(line, prefix)
+	if isSplice {
+		fd, ok := nthCSVArg(rest, 2)
+		return fd, ok && fd != ""
+	}
 	idx := strings.Index(rest, ",")
 	if idx < 0 {
 		return "", false
 	}
 	fd := strings.TrimSpace(rest[:idx])
 	return fd, fd != ""
+}
+
+// parseSyscallResult extracts the integer return value from an strace line
+// ending in ") = N" or ") = -1 ERRNO (...)".
+func parseSyscallResult(line string) (int64, bool) {
+	idx := strings.LastIndex(line, ") = ")
+	if idx < 0 {
+		return 0, false
+	}
+	rest := strings.TrimSpace(line[idx+len(") = "):])
+	if rest == "" {
+		return 0, false
+	}
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// nthCSVArg returns the n-th comma-separated top-level argument from an strace
+// argument list (0-based), ignoring commas inside nested parentheses.
+func nthCSVArg(args string, n int) (string, bool) {
+	depth := 0
+	start := 0
+	argi := 0
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case '(':
+			depth++
+		case ')':
+			if depth == 0 {
+				// End of syscall args.
+				if argi == n {
+					return strings.TrimSpace(args[start:i]), true
+				}
+				return "", false
+			}
+			depth--
+		case ',':
+			if depth != 0 {
+				continue
+			}
+			if argi == n {
+				return strings.TrimSpace(args[start:i]), true
+			}
+			argi++
+			start = i + 1
+		}
+	}
+	if argi == n {
+		return strings.TrimSpace(args[start:]), true
+	}
+	return "", false
 }
 
 func phaseTag(probePhase, targetPhase bool) string {
@@ -859,40 +922,42 @@ func containsSUIDChmod(argsLower string) bool {
 }
 
 func finalizeDynamicFindings(findings []report.Finding) []report.Finding {
-	hasCredentialTheft := false
-	for _, f := range findings {
-		switch f.ReasonCode {
-		case "CREDENTIAL_READ", "ENV_THEFT":
-			hasCredentialTheft = true
-		}
-	}
-
-	out := make([]report.Finding, 0, len(findings))
-	// Existing DATA_EXFIL findings come from observed sendto/sendmsg after a
-	// suspicious connect — those remain the only hard-exfil path.
+	// Existing DATA_EXFIL findings come from observed send after a suspicious
+	// connect — those remain the only hard-exfil path. Index exact
+	// destination/phase keys only (no phase-wide suppression).
 	seenExfil := map[string]bool{}
-	seenCorr := map[string]bool{}
 	for _, f := range findings {
 		if f.ReasonCode == "DATA_EXFIL" {
 			phase := phaseFromEvidence(f.Evidence)
 			seenExfil[f.IP+":"+strconv.Itoa(f.Port)+":"+phase] = true
-			seenExfil["phase:"+phase] = true
 		}
 	}
+
+	// Walk findings in event order. Correlate outbound network only with
+	// credential access observed earlier in the same phase.
+	credSeenByPhase := map[string]bool{}
+	seenCorr := map[string]bool{}
+	out := make([]report.Finding, 0, len(findings))
 	for _, f := range findings {
+		phase := phaseFromEvidence(f.Evidence)
+		switch f.ReasonCode {
+		case "CREDENTIAL_READ", "ENV_THEFT":
+			credSeenByPhase[phase] = true
+			out = append(out, f)
+			continue
+		}
+
 		// Credential read + connect without observed send is correlative only.
 		// Do not upgrade to hard-malicious DATA_EXFIL; emit a warning instead.
-		if hasCredentialTheft && (f.ReasonCode == "EXTERNAL_NETWORK" || f.ReasonCode == "INTERNAL_NETWORK") {
-			phase := phaseFromEvidence(f.Evidence)
+		if credSeenByPhase[phase] && (f.ReasonCode == "EXTERNAL_NETWORK" || f.ReasonCode == "INTERNAL_NETWORK") {
 			exfilKey := f.IP + ":" + strconv.Itoa(f.Port) + ":" + phase
-			// If we already proved send-based exfil to this destination/phase, keep
-			// the network finding suppressed (exfil finding covers it).
-			if seenExfil[exfilKey] || seenExfil["phase:"+phase] {
+			// Suppress the raw network finding only for the exact destination
+			// that already has proven DATA_EXFIL; keep unrelated outbound visible.
+			if seenExfil[exfilKey] {
 				continue
 			}
-			corrKey := exfilKey
-			if !seenCorr[corrKey] {
-				seenCorr[corrKey] = true
+			if !seenCorr[exfilKey] {
+				seenCorr[exfilKey] = true
 				out = append(out, report.Finding{
 					Severity:   report.SeverityWarning,
 					Type:       f.Type,
