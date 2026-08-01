@@ -43,7 +43,6 @@ var (
 	memfdRegex        = regexp.MustCompile(`(?i)memfd_create\("(.*?)"`)
 	ptraceAttachRegex = regexp.MustCompile(`(?i)ptrace\(PTRACE_(?:ATTACH|SEIZE)`)
 	bindListenRegex   = regexp.MustCompile(`(?:bind|listen)\(\d+,\s*\{sa_family=AF_INET6?,\s*sin6?_port=htons\((\d+)\)`)
-	sendRegex         = regexp.MustCompile(`(?i)(?:sendto|sendmsg|sendmmsg|sendfile|splice)\(\d+`)
 
 	// Environment variable theft — reading /proc/self/environ
 	procEnvironRegex = regexp.MustCompile(`(?i)open(?:at)?\(.*?"/proc/self/environ"`)
@@ -399,7 +398,7 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 				key := "MOUNT_ATTEMPT:" + phaseTag(probePhase, targetPhase)
 				if !seen[key] {
 					seen[key] = true
-					emit(report.Finding{Severity: report.SeverityWarning, Type: "privilege", ReasonCode: "MOUNT_OPERATION", Path: line, Confidence: 75, Evidence: "Attempted mount/umount failed in sandbox"})
+					emit(report.Finding{Severity: report.SeverityWarning, Type: "privilege", ReasonCode: "MOUNT_OPERATION_ATTEMPT", Path: line, Confidence: 75, Evidence: "Attempted mount/umount failed in sandbox"})
 				}
 			} else {
 				key := "MOUNT_OP:" + phaseTag(probePhase, targetPhase)
@@ -506,6 +505,13 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 			continue
 		}
 
+		// A closed descriptor can be reused for an unrelated connection. Drop its
+		// prior association only once close succeeds.
+		if fd, ok := parseCloseFD(line); ok {
+			delete(suspiciousByFD, fd)
+			continue
+		}
+
 		// --- Network send after suspicious outbound connect ---
 		// Require a successful positive-byte send on the FD that was previously
 		// connected to a suspicious host. Do not fall back to lastSuspicious for
@@ -577,10 +583,13 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 				}
 			}
 			fd := parseConnectFD(line)
-			if reasonCode != "EXTERNAL_NETWORK_REGISTRY" {
-				// A failed connect does not establish an output FD. It can still be
-				// reported as network activity, but cannot support DATA_EXFIL.
-				if result, ok := parseSyscallResult(line); ok && result == 0 && fd != "" {
+			// A failed connect does not establish an output FD. A successful
+			// registry connect or a successful close must also clear any stale
+			// non-registry association before that FD can be reused.
+			if result, ok := parseSyscallResult(line); ok && result == 0 && fd != "" {
+				if reasonCode == "EXTERNAL_NETWORK_REGISTRY" {
+					delete(suspiciousByFD, fd)
+				} else {
 					suspiciousByFD[fd] = observedConnection{Host: host, IP: ipStr, Port: port}
 				}
 			}
@@ -643,6 +652,24 @@ func parseConnectFD(line string) string {
 		return ""
 	}
 	return strings.TrimSpace(rest[:idx])
+}
+
+func parseCloseFD(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "close(") {
+		return "", false
+	}
+	result, ok := parseSyscallResult(line)
+	if !ok || result != 0 {
+		return "", false
+	}
+	rest := strings.TrimPrefix(line, "close(")
+	idx := strings.Index(rest, ")")
+	if idx < 0 {
+		return "", false
+	}
+	fd := strings.TrimSpace(rest[:idx])
+	return fd, fd != ""
 }
 
 func parseSendFD(line string) (string, bool) {

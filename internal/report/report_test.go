@@ -112,6 +112,18 @@ func TestEvaluateFailedAccountFileAccessNotMalicious(t *testing.T) {
 	}
 }
 
+func TestEvaluateFailedMountNotMalicious(t *testing.T) {
+	verdict, _ := Evaluate([]Finding{
+		{Severity: SeverityWarning, ReasonCode: "MOUNT_OPERATION_ATTEMPT"},
+	}, defaultOpts)
+	if verdict == VerdictMalicious {
+		t.Fatalf("expected non-malicious verdict for failed mount, got %s", verdict)
+	}
+	if verdict != VerdictSuspicious {
+		t.Fatalf("expected suspicious verdict for failed mount, got %s", verdict)
+	}
+}
+
 func TestEvaluateSuccessfulShadowAccessIsMalicious(t *testing.T) {
 	verdict, _ := Evaluate([]Finding{
 		{Severity: SeverityCritical, ReasonCode: "ACCOUNT_FILE_ACCESS", Path: "/etc/shadow"},

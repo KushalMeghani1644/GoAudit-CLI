@@ -217,7 +217,7 @@ func isPrivilegeWarning(f Finding) bool {
 	switch f.ReasonCode {
 	case "PRIVILEGE_ESCALATION_ATTEMPT", "PRIVILEGE_ESCALATION_EXEC", "SUID_SGID_BIT_SET",
 		"CAPABILITY_ESCALATION", "CAPABILITY_CHANGE", "NAMESPACE_ESCAPE_ATTEMPT", "LD_PRELOAD_PRIVILEGE_ATTEMPT",
-		"ACCOUNT_FILE_ACCESS":
+		"ACCOUNT_FILE_ACCESS", "MOUNT_OPERATION_ATTEMPT":
 		return true
 	default:
 		return false
@@ -260,6 +260,8 @@ func reasonWeight(reasonCode string) int {
 		// Neutral capset drop/clear — noteworthy but not hard-malicious.
 		return 30
 	case "PRIVILEGE_ESCALATION_ATTEMPT", "PRIVILEGE_ESCALATION_EXEC":
+		return 45
+	case "MOUNT_OPERATION_ATTEMPT":
 		return 45
 	case "CREDENTIAL_READ_WITH_OUTBOUND":
 		return 50

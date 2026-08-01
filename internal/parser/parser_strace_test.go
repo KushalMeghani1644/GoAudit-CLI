@@ -637,6 +637,18 @@ func TestDetectsMountOperation(t *testing.T) {
 	}
 }
 
+func TestFailedMountIsWarningAttempt(t *testing.T) {
+	input := "GOAUDIT_RUNTIME_META:phase=target\n" +
+		`mount("tmpfs", "/mnt", "tmpfs", 0, NULL) = -1 EPERM (Operation not permitted)`
+	f := findByReason(parse(t, input), "MOUNT_OPERATION_ATTEMPT")
+	if f == nil {
+		t.Fatal("expected MOUNT_OPERATION_ATTEMPT for failed mount")
+	}
+	if f.Severity != report.SeverityWarning {
+		t.Fatalf("expected warning for failed mount, got %s", f.Severity)
+	}
+}
+
 func TestCapsetIsCapabilityChangeNotEscalation(t *testing.T) {
 	input := "GOAUDIT_RUNTIME_META:phase=target\n" +
 		`capset({version=_LINUX_CAPABILITY_VERSION_3, pid=0}, {effective=1<<CAP_NET_ADMIN, permitted=1<<CAP_NET_ADMIN, inheritable=0}) = 0`
@@ -708,6 +720,32 @@ func TestFailedConnectDoesNotEstablishExfilFD(t *testing.T) {
 		`sendto(3, "payload", 7, 0, NULL, 0) = 7`
 	if f := findByReason(parse(t, input), "DATA_EXFIL"); f != nil {
 		t.Fatalf("did not expect DATA_EXFIL after failed connect, got %+v", f)
+	}
+}
+
+func TestClosedFDDoesNotProduceDataExfilAfterReuse(t *testing.T) {
+	input := "GOAUDIT_RUNTIME_META:phase=target\n" +
+		`connect(3, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr("45.33.32.156")}, 16) = 0` + "\n" +
+		`close(3) = 0` + "\n" +
+		`sendto(3, "payload", 7, 0, NULL, 0) = 7`
+	if f := findByReason(parse(t, input), "DATA_EXFIL"); f != nil {
+		t.Fatalf("did not expect DATA_EXFIL after closing the tracked FD, got %+v", f)
+	}
+}
+
+func TestRegistryConnectionClearsReusedFD(t *testing.T) {
+	registryIP := "104.16.23.35"
+	input := "GOAUDIT_RUNTIME_META:phase=target\n" +
+		`connect(3, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr("45.33.32.156")}, 16) = 0` + "\n" +
+		`connect(3, {sa_family=AF_INET, sin_port=htons(443), sin_addr=inet_addr("104.16.23.35")}, 16) = 0` + "\n" +
+		`sendto(3, "payload", 7, 0, NULL, 0) = 7`
+	rep := report.NewReporter(true, false)
+	findings, err := ParseStream(strings.NewReader(input), rep, ParseOptions{KnownRegistryIPs: map[string]string{registryIP: "registry.example"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if f := findByReason(findings, "DATA_EXFIL"); f != nil {
+		t.Fatalf("did not expect DATA_EXFIL after FD was reused for a registry connection, got %+v", f)
 	}
 }
 

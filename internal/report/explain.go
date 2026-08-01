@@ -20,6 +20,7 @@ var reasonExplanations = map[string]Explanation{
 	"LD_PRELOAD_PRIVILEGE_ATTEMPT":   {"LD_PRELOAD Privilege Attempt", "Attempted to inject a preload library into a privileged helper"},
 	"OWNERSHIP_CHANGE":               {"Ownership Change", "Changed ownership of a sensitive path (chown on startup/binaries/account files)"},
 	"MOUNT_OPERATION":                {"Mount Operation", "Performed or attempted mount/umount inside the sandbox"},
+	"MOUNT_OPERATION_ATTEMPT":        {"Mount Operation Attempt", "Attempted mount/umount inside the sandbox, but the syscall failed"},
 	"ACCOUNT_FILE_ACCESS":            {"Privilege-Sensitive Account File Access", "Accessed /etc/passwd or /etc/shadow, which can expose account data or support privilege escalation"},
 	"SUSPICIOUS_EXEC":                {"Suspicious Process", "Executed a known attack tool (netcat, reverse shell) or ran a binary from /tmp"},
 	"FILELESS_EXEC":                  {"Fileless Execution", "Used memfd_create to run code without writing to disk — a common evasion technique"},
