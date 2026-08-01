@@ -66,12 +66,12 @@ func TestFormatHumanReportPrivilegeEscalationIsInstallCritical(t *testing.T) {
 
 func TestFormatHumanReportAccountFileAccessIsPrivilegeBehavior(t *testing.T) {
 	findings := []Finding{
-		{Severity: SeverityCritical, Type: "privilege", ReasonCode: "ACCOUNT_FILE_ACCESS", Path: "/etc/passwd", Evidence: "[install]"},
+		{Severity: SeverityCritical, Type: "privilege", ReasonCode: "ACCOUNT_FILE_ACCESS", Path: "/etc/shadow", Evidence: "[install]"},
 	}
 	out := FormatHumanReport(findings, ReportMeta{Command: "npm install ./evil"}, VerdictMalicious, 80)
 	if !containsAll(out,
 		"During install, the target accessed Unix account files such as /etc/passwd or /etc/shadow.",
-		"PRIVILEGE-SENSITIVE ACCOUNT FILE ACCESS: /etc/passwd",
+		"PRIVILEGE-SENSITIVE ACCOUNT FILE ACCESS: /etc/shadow",
 	) {
 		t.Fatalf("expected account-file access to be reported as privilege-sensitive behavior, got:\n%s", out)
 	}
