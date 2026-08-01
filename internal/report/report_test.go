@@ -99,6 +99,51 @@ func TestEvaluatePrivilegeEscalationAttemptIsSuspicious(t *testing.T) {
 	}
 }
 
+func TestEvaluateFailedAccountFileAccessNotMalicious(t *testing.T) {
+	// Denied shadow access alone must not force MALICIOUS (scanner false positive path).
+	verdict, _ := Evaluate([]Finding{
+		{Severity: SeverityWarning, ReasonCode: "ACCOUNT_FILE_ACCESS", Path: "/etc/shadow"},
+	}, defaultOpts)
+	if verdict == VerdictMalicious {
+		t.Fatalf("expected non-malicious verdict for failed ACCOUNT_FILE_ACCESS, got %s", verdict)
+	}
+	if verdict != VerdictSuspicious {
+		t.Fatalf("expected suspicious verdict for failed ACCOUNT_FILE_ACCESS, got %s", verdict)
+	}
+}
+
+func TestEvaluateFailedMountNotMalicious(t *testing.T) {
+	verdict, _ := Evaluate([]Finding{
+		{Severity: SeverityWarning, ReasonCode: "MOUNT_OPERATION_ATTEMPT"},
+	}, defaultOpts)
+	if verdict == VerdictMalicious {
+		t.Fatalf("expected non-malicious verdict for failed mount, got %s", verdict)
+	}
+	if verdict != VerdictSuspicious {
+		t.Fatalf("expected suspicious verdict for failed mount, got %s", verdict)
+	}
+}
+
+func TestEvaluateSuccessfulShadowAccessIsMalicious(t *testing.T) {
+	verdict, _ := Evaluate([]Finding{
+		{Severity: SeverityCritical, ReasonCode: "ACCOUNT_FILE_ACCESS", Path: "/etc/shadow"},
+	}, defaultOpts)
+	if verdict != VerdictMalicious {
+		t.Fatalf("expected malicious verdict for critical ACCOUNT_FILE_ACCESS, got %s", verdict)
+	}
+}
+
+func TestEvaluatePasswdReadOnlyNotMalicious(t *testing.T) {
+	// Simulates a clean non-root scan that only has registry traffic + no account findings.
+	// (passwd reads are suppressed in the parser; ensure leftover info wouldn't hard-fail.)
+	verdict, _ := Evaluate([]Finding{
+		{Severity: SeverityInfo, ReasonCode: "EXTERNAL_NETWORK_REGISTRY"},
+	}, defaultOpts)
+	if verdict == VerdictMalicious {
+		t.Fatalf("expected non-malicious clean install-like findings, got %s", verdict)
+	}
+}
+
 func TestEvaluatePrivilegeEscalationAttemptWithMaliciousFinding(t *testing.T) {
 	verdict, _ := Evaluate([]Finding{
 		{Severity: SeverityWarning, ReasonCode: "PRIVILEGE_ESCALATION_ATTEMPT"},

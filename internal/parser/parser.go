@@ -23,12 +23,15 @@ func HasPrepFailure(findings []report.Finding) bool {
 }
 
 var (
-	fsRegex    = regexp.MustCompile(`(?i)(?:open|openat|openat2).*?\"(.*?)\",\s*(?:\{[^}]*flags=)?([A-Z_\|]+)`)
-	netRegex   = regexp.MustCompile(`connect\(.*sa_family=(?:AF_INET|AF_INET6).*?sin6?_port=htons\((\d+)\).*?(?:inet_addr\("(.*?)"\)|inet_pton\([^,]+,\s*"(.*?)")`)
-	execRegex  = regexp.MustCompile(`(?i)execve\(\"(.*?)\",\s*\[(.*?)\]`)
-	mutRegex   = regexp.MustCompile(`(?i)(?:chmod|fchmod|fchmodat|rename|unlink|unlinkat)\(\"?(.*?)\"?[,)]`)
-	privRegex  = regexp.MustCompile(`(?i)(setuid|setgid|seteuid|setegid|setreuid|setregid|setresuid|setresgid|setgroups)\(([^)]*)\)`)
-	chmodRegex = regexp.MustCompile(`(?i)(?:chmod|fchmodat)\([^"]*"?([^",)]*)"?\s*,\s*0?([0-7]{3,4})`)
+	fsRegex   = regexp.MustCompile(`(?i)(?:open|openat|openat2).*?\"(.*?)\",\s*(?:\{[^}]*flags=)?([A-Z_\|]+)`)
+	netRegex  = regexp.MustCompile(`connect\(.*sa_family=(?:AF_INET|AF_INET6).*?sin6?_port=htons\((\d+)\).*?(?:inet_addr\("(.*?)"\)|inet_pton\([^,]+,\s*"(.*?)")`)
+	execRegex = regexp.MustCompile(`(?i)execve\(\"(.*?)\",\s*\[(.*?)\]`)
+	// Word boundary avoids matching "link(" inside "symlink(".
+	mutRegex    = regexp.MustCompile(`(?i)\b(?:chmod|fchmod|fchmodat|rename|renameat|renameat2|link|linkat|mkdir|mkdirat|unlink|unlinkat|truncate|ftruncate|chown|fchown|lchown|fchownat)\(`)
+	mountRegex  = regexp.MustCompile(`(?i)\b(?:mount|umount2)\(`)
+	capsetRegex = regexp.MustCompile(`(?i)\bcapset\(`)
+	privRegex   = regexp.MustCompile(`(?i)(setuid|setgid|seteuid|setegid|setreuid|setregid|setresuid|setresgid|setgroups)\(([^)]*)\)`)
+	chmodRegex  = regexp.MustCompile(`(?i)(?:chmod|fchmodat)\([^"]*"?([^",)]*)"?\s*,\s*0?([0-7]{3,4})`)
 
 	readCriticalPaths  = regexp.MustCompile(`(?i)((?:^|.*?/)\.env(?:\b|$)|.*?/\.ssh/.*?|.*?/\.aws/.*?|.*?/\.kube/.*?|.*?/\.git-credentials|.*?/\.npmrc|.*?id_rsa|^/etc/shadow$)`)
 	writeCriticalPaths = regexp.MustCompile(`(?i)(.*?/\.bashrc|.*?/\.zshrc|.*?/\.profile|.*?/\.ssh/authorized_keys|^/etc/crontab|^/etc/cron\..*|^/usr/local/bin/.*|^/usr/bin/.*|^/etc/passwd$|^/etc/shadow$)`)
@@ -40,7 +43,6 @@ var (
 	memfdRegex        = regexp.MustCompile(`(?i)memfd_create\("(.*?)"`)
 	ptraceAttachRegex = regexp.MustCompile(`(?i)ptrace\(PTRACE_(?:ATTACH|SEIZE)`)
 	bindListenRegex   = regexp.MustCompile(`(?:bind|listen)\(\d+,\s*\{sa_family=AF_INET6?,\s*sin6?_port=htons\((\d+)\)`)
-	sendRegex         = regexp.MustCompile(`(?i)(?:sendto|sendmsg)\(\d+`)
 
 	// Environment variable theft — reading /proc/self/environ
 	procEnvironRegex = regexp.MustCompile(`(?i)open(?:at)?\(.*?"/proc/self/environ"`)
@@ -100,8 +102,6 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 	targetPhase := false
 	health := TraceHealth{ProbeExpected: opts.ProbeExpected}
 	seen := map[string]bool{} // deduplication key
-	sawSuspiciousOutbound := false
-	lastSuspicious := observedConnection{}
 	suspiciousByFD := map[string]observedConnection{}
 
 	if opts.KnownRegistryIPs == nil {
@@ -149,20 +149,26 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 			emit(report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: "PROBE_COMMAND_TIMEOUT", Path: "124", Confidence: 95, Evidence: "Runtime probe timed out"})
 			continue
 		}
+		if strings.Contains(line, "GOAUDIT_PROBE_LIMITATION") {
+			key := "PROBE_LIMITATION"
+			if !seen[key] {
+				seen[key] = true
+				emit(report.Finding{Severity: report.SeverityInfo, Type: "runtime", ReasonCode: "PROBE_LIMITATION", Path: "probe", Confidence: 90, Evidence: "Runtime probe covers package import/require and optional bin --help only"})
+			}
+			continue
+		}
 		if strings.Contains(line, "GOAUDIT_RUNTIME_META:") {
 			meta := strings.TrimSpace(line[strings.Index(line, "GOAUDIT_RUNTIME_META:")+len("GOAUDIT_RUNTIME_META:"):])
 			if strings.Contains(meta, "phase=probe") {
 				probePhase = true
 				targetPhase = true
 				health.ProbePhaseObserved = true
-				sawSuspiciousOutbound = false
-				lastSuspicious = observedConnection{}
+				suspiciousByFD = map[string]observedConnection{}
 			}
 			if strings.Contains(meta, "phase=target") {
 				targetPhase = true
 				health.TargetPhaseObserved = true
-				sawSuspiciousOutbound = false
-				lastSuspicious = observedConnection{}
+				suspiciousByFD = map[string]observedConnection{}
 			}
 			emit(report.Finding{Severity: report.SeverityInfo, Type: "runtime", ReasonCode: "RUNTIME_METADATA", Path: "sandbox", Confidence: 90, Evidence: meta})
 			continue
@@ -233,6 +239,12 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 			failed := strings.Contains(line, "= -1 ")
 			isWrite := strings.Contains(flags, "O_WRONLY") || strings.Contains(flags, "O_RDWR") || strings.Contains(flags, "O_CREAT")
 			if isAccountFile(path) {
+				// O_RDONLY of /etc/passwd is normal NSS/account lookup (runuser, getent,
+				// libc). Flagging it causes scanner-induced false positives on every
+				// non-root scan. Only writes to passwd and any access to shadow matter.
+				if path == "/etc/passwd" && !isWrite {
+					continue
+				}
 				key := "ACCOUNT_FILE_ACCESS:" + path + ":" + phaseTag(probePhase, targetPhase)
 				if !seen[key] {
 					seen[key] = true
@@ -330,7 +342,7 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 		}
 
 		// --- Mutation ---
-		if mutMatches := mutRegex.FindStringSubmatch(line); len(mutMatches) > 1 {
+		if mutRegex.MatchString(line) {
 			if path, mode, ok := parseChmodModePath(line); ok && hasSUIDOrSGIDBit(mode) {
 				key := "SUID_SGID_BIT_SET:" + path + ":" + mode + ":" + phaseTag(probePhase, targetPhase)
 				if !seen[key] {
@@ -351,13 +363,69 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 			if strings.Contains(line, "= -1 ") {
 				continue
 			}
-			path := mutMatches[1]
-			if path != "" && writeCriticalPaths.MatchString(path) {
+			// chown of sensitive paths is persistence / ownership takeover signal.
+			if strings.Contains(strings.ToLower(line), "chown") {
+				for _, path := range extractQuotedPaths(line) {
+					if path == "" || !writeCriticalPaths.MatchString(path) {
+						continue
+					}
+					key := "OWNERSHIP_CHANGE:" + path + ":" + phaseTag(probePhase, targetPhase)
+					if !seen[key] {
+						seen[key] = true
+						emit(report.Finding{Severity: report.SeverityCritical, Type: "privilege", ReasonCode: "OWNERSHIP_CHANGE", Path: path, Confidence: 88, Evidence: "Changed ownership of a sensitive path"})
+					}
+				}
+				// Still also evaluate for PERSISTENCE_WRITE below when path matches.
+			}
+			// Check all path arguments so rename("/tmp/x", "/etc/cron.d/x") flags the destination.
+			// Also covers truncate of critical paths.
+			for _, path := range extractQuotedPaths(line) {
+				if path == "" || !writeCriticalPaths.MatchString(path) {
+					continue
+				}
 				key := "PERSISTENCE_WRITE:" + path + ":" + phaseTag(probePhase, targetPhase)
 				if !seen[key] {
 					seen[key] = true
 					emit(report.Finding{Severity: report.SeverityCritical, Type: "fs_write", ReasonCode: "PERSISTENCE_WRITE", Path: path, Confidence: 90})
 				}
+			}
+			continue
+		}
+
+		// --- mount / umount2 ---
+		if mountRegex.MatchString(line) {
+			if strings.Contains(line, "= -1 ") {
+				key := "MOUNT_ATTEMPT:" + phaseTag(probePhase, targetPhase)
+				if !seen[key] {
+					seen[key] = true
+					emit(report.Finding{Severity: report.SeverityWarning, Type: "privilege", ReasonCode: "MOUNT_OPERATION_ATTEMPT", Path: line, Confidence: 75, Evidence: "Attempted mount/umount failed in sandbox"})
+				}
+			} else {
+				key := "MOUNT_OP:" + phaseTag(probePhase, targetPhase)
+				if !seen[key] {
+					seen[key] = true
+					emit(report.Finding{Severity: report.SeverityCritical, Type: "privilege", ReasonCode: "MOUNT_OPERATION", Path: line, Confidence: 92, Evidence: "Performed mount/umount inside the sandbox"})
+				}
+			}
+			continue
+		}
+
+		// --- capset ---
+		// capset can raise, retain, drop, or clear capabilities. A syscall trace
+		// has no prior capability set, so even a non-zero result cannot prove an
+		// increase. Keep this as a neutral capability-change warning.
+		if capsetRegex.MatchString(line) {
+			failed := strings.Contains(line, "= -1 ")
+			key := "CAPSET:" + phaseTag(probePhase, targetPhase)
+			if !seen[key] {
+				seen[key] = true
+				conf := 70
+				ev := "capset used to modify process capabilities without a proven increase"
+				if failed {
+					conf = 60
+					ev = "capset capability change failed in sandbox"
+				}
+				emit(report.Finding{Severity: report.SeverityWarning, Type: "privilege", ReasonCode: "CAPABILITY_CHANGE", Path: line, Confidence: conf, Evidence: ev})
 			}
 			continue
 		}
@@ -437,13 +505,20 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 			continue
 		}
 
+		// A closed descriptor can be reused for an unrelated connection. Drop its
+		// prior association only once close succeeds.
+		if fd, ok := parseCloseFD(line); ok {
+			delete(suspiciousByFD, fd)
+			continue
+		}
+
 		// --- Network send after suspicious outbound connect ---
+		// Require a successful positive-byte send on the FD that was previously
+		// connected to a suspicious host. Do not fall back to lastSuspicious for
+		// unrelated or failed send-like syscalls.
 		if sendFD, ok := parseSendFD(line); ok && targetPhase {
 			conn, matchedFD := suspiciousByFD[sendFD]
-			if !matchedFD && sawSuspiciousOutbound {
-				conn = lastSuspicious
-			}
-			if !matchedFD && !sawSuspiciousOutbound {
+			if !matchedFD {
 				continue
 			}
 			key := "DATA_EXFIL_SEND:" + conn.IP + ":" + strconv.Itoa(conn.Port) + ":" + phaseTag(probePhase, targetPhase)
@@ -495,27 +570,27 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 				host = registryHost
 				reasonCode = "EXTERNAL_NETWORK_REGISTRY"
 				severity = report.SeverityInfo
-				sawSuspiciousOutbound = false
 			} else if ipStr == "169.254.169.254" {
 				host = "cloud metadata service"
 				reasonCode = "CLOUD_METADATA_ACCESS"
 				severity = report.SeverityCritical
-				sawSuspiciousOutbound = true
 			} else if ip != nil && (ip.IsPrivate() || ip.IsLinkLocalUnicast()) {
 				reasonCode = "INTERNAL_NETWORK"
 				severity = report.SeverityWarning
-				sawSuspiciousOutbound = true
 			} else {
-				sawSuspiciousOutbound = true
 				if names, err := net.LookupAddr(ipStr); err == nil && len(names) > 0 {
 					host = strings.TrimSuffix(names[0], ".")
 				}
 			}
 			fd := parseConnectFD(line)
-			if sawSuspiciousOutbound && reasonCode != "EXTERNAL_NETWORK_REGISTRY" {
-				lastSuspicious = observedConnection{Host: host, IP: ipStr, Port: port}
-				if fd != "" {
-					suspiciousByFD[fd] = lastSuspicious
+			// A failed connect does not establish an output FD. A successful
+			// registry connect or a successful close must also clear any stale
+			// non-registry association before that FD can be reused.
+			if result, ok := parseSyscallResult(line); ok && result == 0 && fd != "" {
+				if reasonCode == "EXTERNAL_NETWORK_REGISTRY" {
+					delete(suspiciousByFD, fd)
+				} else {
+					suspiciousByFD[fd] = observedConnection{Host: host, IP: ipStr, Port: port}
 				}
 			}
 
@@ -579,23 +654,120 @@ func parseConnectFD(line string) string {
 	return strings.TrimSpace(rest[:idx])
 }
 
+func parseCloseFD(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "close(") {
+		return "", false
+	}
+	result, ok := parseSyscallResult(line)
+	if !ok || result != 0 {
+		return "", false
+	}
+	rest := strings.TrimPrefix(line, "close(")
+	idx := strings.Index(rest, ")")
+	if idx < 0 {
+		return "", false
+	}
+	fd := strings.TrimSpace(rest[:idx])
+	return fd, fd != ""
+}
+
 func parseSendFD(line string) (string, bool) {
 	line = strings.TrimSpace(line)
+	// Only successful transfers with a positive result count as exfil evidence.
+	// Failed (= -1) and zero-byte (= 0) sends must not produce DATA_EXFIL.
+	if result, ok := parseSyscallResult(line); !ok || result <= 0 {
+		return "", false
+	}
+
 	prefix := ""
-	if strings.HasPrefix(line, "sendto(") {
+	isSplice := false
+	switch {
+	case strings.HasPrefix(line, "sendto("):
 		prefix = "sendto("
-	} else if strings.HasPrefix(line, "sendmsg(") {
+	case strings.HasPrefix(line, "sendmsg("):
 		prefix = "sendmsg("
-	} else {
+	case strings.HasPrefix(line, "sendmmsg("):
+		prefix = "sendmmsg("
+	case strings.HasPrefix(line, "sendfile("):
+		// sendfile(out_fd, in_fd, ...) — out_fd is the network destination side.
+		prefix = "sendfile("
+	case strings.HasPrefix(line, "splice("):
+		// splice(fd_in, off_in, fd_out, ...) — fd_out is the destination side.
+		prefix = "splice("
+		isSplice = true
+	default:
 		return "", false
 	}
 	rest := strings.TrimPrefix(line, prefix)
+	if isSplice {
+		fd, ok := nthCSVArg(rest, 2)
+		return fd, ok && fd != ""
+	}
 	idx := strings.Index(rest, ",")
 	if idx < 0 {
 		return "", false
 	}
 	fd := strings.TrimSpace(rest[:idx])
 	return fd, fd != ""
+}
+
+// parseSyscallResult extracts the integer return value from an strace line
+// ending in ") = N" or ") = -1 ERRNO (...)".
+func parseSyscallResult(line string) (int64, bool) {
+	idx := strings.LastIndex(line, ") = ")
+	if idx < 0 {
+		return 0, false
+	}
+	rest := strings.TrimSpace(line[idx+len(") = "):])
+	if rest == "" {
+		return 0, false
+	}
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// nthCSVArg returns the n-th comma-separated top-level argument from an strace
+// argument list (0-based), ignoring commas inside nested parentheses.
+func nthCSVArg(args string, n int) (string, bool) {
+	depth := 0
+	start := 0
+	argi := 0
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case '(':
+			depth++
+		case ')':
+			if depth == 0 {
+				// End of syscall args.
+				if argi == n {
+					return strings.TrimSpace(args[start:i]), true
+				}
+				return "", false
+			}
+			depth--
+		case ',':
+			if depth != 0 {
+				continue
+			}
+			if argi == n {
+				return strings.TrimSpace(args[start:i]), true
+			}
+			argi++
+			start = i + 1
+		}
+	}
+	if argi == n {
+		return strings.TrimSpace(args[start:]), true
+	}
+	return "", false
 }
 
 func phaseTag(probePhase, targetPhase bool) string {
@@ -640,6 +812,26 @@ func isShellBinary(bin string) bool {
 
 func isAccountFile(path string) bool {
 	return path == "/etc/passwd" || path == "/etc/shadow"
+}
+
+// extractQuotedPaths returns double-quoted path arguments from an strace line.
+func extractQuotedPaths(line string) []string {
+	var paths []string
+	rest := line
+	for {
+		start := strings.Index(rest, "\"")
+		if start < 0 {
+			break
+		}
+		rest = rest[start+1:]
+		end := strings.Index(rest, "\"")
+		if end < 0 {
+			break
+		}
+		paths = append(paths, rest[:end])
+		rest = rest[end+1:]
+	}
+	return paths
 }
 
 func normalizeNumericArg(arg string) string {
@@ -757,43 +949,56 @@ func containsSUIDChmod(argsLower string) bool {
 }
 
 func finalizeDynamicFindings(findings []report.Finding) []report.Finding {
-	hasCredentialTheft := false
-	for _, f := range findings {
-		switch f.ReasonCode {
-		case "CREDENTIAL_READ", "ENV_THEFT":
-			hasCredentialTheft = true
-		}
-	}
-
-	out := make([]report.Finding, 0, len(findings))
+	// Existing DATA_EXFIL findings come from observed send after a suspicious
+	// connect — those remain the only hard-exfil path. Index exact
+	// destination/phase keys only (no phase-wide suppression).
 	seenExfil := map[string]bool{}
 	for _, f := range findings {
 		if f.ReasonCode == "DATA_EXFIL" {
 			phase := phaseFromEvidence(f.Evidence)
 			seenExfil[f.IP+":"+strconv.Itoa(f.Port)+":"+phase] = true
-			seenExfil["phase:"+phase] = true
 		}
 	}
+
+	// Walk findings in event order. Correlate outbound network only with
+	// credential access observed earlier in the same phase.
+	credSeenByPhase := map[string]bool{}
+	seenCorr := map[string]bool{}
+	out := make([]report.Finding, 0, len(findings))
 	for _, f := range findings {
-		if hasCredentialTheft && (f.ReasonCode == "EXTERNAL_NETWORK" || f.ReasonCode == "INTERNAL_NETWORK") {
-			phase := phaseFromEvidence(f.Evidence)
-			key := f.IP + ":" + strconv.Itoa(f.Port) + ":" + phase
-			if seenExfil[key] || seenExfil["phase:"+phase] {
+		phase := phaseFromEvidence(f.Evidence)
+		switch f.ReasonCode {
+		case "CREDENTIAL_READ", "ENV_THEFT":
+			credSeenByPhase[phase] = true
+			out = append(out, f)
+			continue
+		}
+
+		// Credential read + connect without observed send is correlative only.
+		// Do not upgrade to hard-malicious DATA_EXFIL; emit a warning instead.
+		if credSeenByPhase[phase] && (f.ReasonCode == "EXTERNAL_NETWORK" || f.ReasonCode == "INTERNAL_NETWORK") {
+			exfilKey := f.IP + ":" + strconv.Itoa(f.Port) + ":" + phase
+			// Suppress the raw network finding only for the exact destination
+			// that already has proven DATA_EXFIL; keep unrelated outbound visible.
+			if seenExfil[exfilKey] {
 				continue
 			}
-			seenExfil[key] = true
-			seenExfil["phase:"+phase] = true
-			out = append(out, report.Finding{
-				Severity:   report.SeverityCritical,
-				Type:       f.Type,
-				ReasonCode: "DATA_EXFIL",
-				Path:       f.Host,
-				Host:       f.Host,
-				Port:       f.Port,
-				IP:         f.IP,
-				Confidence: 90,
-				Evidence:   appendPhaseEvidence("Outbound connection to non-registry host after credential access was observed", f.Evidence),
-			})
+			if !seenCorr[exfilKey] {
+				seenCorr[exfilKey] = true
+				out = append(out, report.Finding{
+					Severity:   report.SeverityWarning,
+					Type:       f.Type,
+					ReasonCode: "CREDENTIAL_READ_WITH_OUTBOUND",
+					Path:       f.Host,
+					Host:       f.Host,
+					Port:       f.Port,
+					IP:         f.IP,
+					Confidence: 70,
+					Evidence:   appendPhaseEvidence("Outbound connection to non-registry host after credential access was observed (no data send proven)", f.Evidence),
+				})
+			}
+			// Still keep the underlying network finding for visibility.
+			out = append(out, f)
 			continue
 		}
 		out = append(out, f)
