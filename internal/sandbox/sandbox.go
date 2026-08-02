@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/diagnostic"
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
@@ -39,7 +40,13 @@ type Sandbox struct {
 func NewSandbox(ctx context.Context, image string, opts SandboxOptions) (*Sandbox, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
-		return nil, err
+		return nil, diagnostic.New(
+			"Cannot initialize Docker.",
+			diagnostic.Cause("GoAudit uses Docker to create the sandbox, but the Docker client could not be configured."),
+			diagnostic.Hint("Check DOCKER_HOST and Docker environment variables."),
+			diagnostic.Hint("Verify Docker works with: docker version"),
+			diagnostic.Wrap(err),
+		)
 	}
 
 	runtime := detectRuntime(ctx, cli)
@@ -67,13 +74,23 @@ func (s *Sandbox) EnsureImage(ctx context.Context) (string, error) {
 		if _, err := s.cli.ImageInspect(ctx, s.image); err == nil {
 			return s.InspectImageDigest(ctx, s.image)
 		} else if !cerrdefs.IsNotFound(err) {
-			return "", err
+			return "", diagnostic.New(
+				fmt.Sprintf("Cannot inspect Docker image %s.", s.image),
+				diagnostic.Cause("Docker returned an error while checking whether the image exists locally."),
+				diagnostic.Hint("Verify Docker is running and that your user can access the Docker daemon."),
+				diagnostic.Wrap(err),
+			)
 		}
 	}
 
 	reader, err := s.cli.ImagePull(ctx, s.image, image.PullOptions{})
 	if err != nil {
-		return "", err
+		return "", diagnostic.New(
+			fmt.Sprintf("Cannot pull Docker image %s.", s.image),
+			diagnostic.Cause("The sandbox image is not available locally and Docker could not pull it."),
+			diagnostic.Hints(imagePullHints(s.image)...),
+			diagnostic.Wrap(err),
+		)
 	}
 	defer reader.Close()
 	dec := json.NewDecoder(reader)
@@ -88,16 +105,38 @@ func (s *Sandbox) EnsureImage(ctx context.Context) (string, error) {
 			if err == io.EOF {
 				break
 			}
-			return "", err
+			return "", diagnostic.New(
+				fmt.Sprintf("Docker image pull output for %s could not be parsed.", s.image),
+				diagnostic.Cause("Docker returned malformed progress output while pulling the sandbox image."),
+				diagnostic.Hint("Retry the scan; if it persists, run docker pull "+s.image+" to see the raw Docker error."),
+				diagnostic.Wrap(err),
+			)
 		}
 		if msg.Error != "" {
+			pullErr := fmt.Errorf("%s", msg.Error)
 			if msg.ErrorDetail.Message != "" {
-				return "", fmt.Errorf("%s: %s", msg.Error, msg.ErrorDetail.Message)
+				pullErr = fmt.Errorf("%s: %s", msg.Error, msg.ErrorDetail.Message)
 			}
-			return "", fmt.Errorf("%s", msg.Error)
+			return "", diagnostic.New(
+				fmt.Sprintf("Docker could not pull image %s.", s.image),
+				diagnostic.Cause("The registry rejected or failed the image pull."),
+				diagnostic.Hints(imagePullHints(s.image)...),
+				diagnostic.Wrap(pullErr),
+			)
 		}
 	}
 	return s.InspectImageDigest(ctx, s.image)
+}
+
+func imagePullHints(img string) []string {
+	hints := []string{
+		"Verify Docker is running and that the machine has network access to the image registry.",
+		"Run docker pull " + img + " to see the registry error directly.",
+	}
+	if strings.HasPrefix(img, "ghcr.io/") {
+		hints = append(hints, "If the registry requires authentication, run docker login ghcr.io.")
+	}
+	return hints
 }
 
 func (s *Sandbox) InspectImageDigest(ctx context.Context, imageRef string) (string, error) {
@@ -289,19 +328,34 @@ fi
 		Tty: false, AttachStderr: true, AttachStdout: true,
 	}, hostConfig, nil, nil, "")
 	if err != nil {
-		return nil, err
+		return nil, diagnostic.New(
+			"Cannot create sandbox container.",
+			diagnostic.Cause("Docker rejected the container configuration for the scan."),
+			diagnostic.Hints(containerCreateHints(s.runtime, projectPath)...),
+			diagnostic.Wrap(err),
+		)
 	}
 	s.containerID = resp.ID
 
 	if err := s.cli.ContainerStart(ctx, s.containerID, container.StartOptions{}); err != nil {
-		return nil, err
+		return nil, diagnostic.New(
+			"Cannot start sandbox container.",
+			diagnostic.Cause("Docker created the container but failed to start it."),
+			diagnostic.Hint("Check Docker daemon health and available CPU/memory."),
+			diagnostic.Wrap(err),
+		)
 	}
 
 	logs, err := s.cli.ContainerLogs(ctx, s.containerID, container.LogsOptions{
 		ShowStdout: true, ShowStderr: true, Follow: true,
 	})
 	if err != nil {
-		return nil, err
+		return nil, diagnostic.New(
+			"Cannot read sandbox logs.",
+			diagnostic.Cause("GoAudit started the container but could not attach to its output."),
+			diagnostic.Hint("Retry the scan; if it persists, inspect the container logs with docker logs "+s.containerID+"."),
+			diagnostic.Wrap(err),
+		)
 	}
 	pr, pw := io.Pipe()
 	go func() {
@@ -310,6 +364,17 @@ fi
 		_ = pw.CloseWithError(copyErr)
 	}()
 	return pr, nil
+}
+
+func containerCreateHints(runtime, projectPath string) []string {
+	hints := []string{"Run docker info to verify the Docker daemon is healthy."}
+	if runtime == "runsc" {
+		hints = append(hints, "If the error mentions runtime runsc, install/register gVisor or rerun without the runsc Docker runtime.")
+	}
+	if projectPath != "" {
+		hints = append(hints, "If the error mentions a bind mount, verify the project path is shared with Docker: "+projectPath)
+	}
+	return hints
 }
 
 // Cleanup removes or stops the sandbox container.
