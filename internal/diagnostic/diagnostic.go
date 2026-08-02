@@ -82,26 +82,33 @@ func Format(err error) string {
 	}
 
 	var diag *Error
-	if !errors.As(err, &diag) {
+	if !errors.As(err, &diag) || diag == nil {
 		return fmt.Sprintf("Error: %v\n", err)
 	}
 
 	var b strings.Builder
+	root := RootCause(err)
+	rootMessage := ""
+	if root != nil {
+		rootMessage = root.Error()
+	}
 	summary := diag.Summary
 	if summary == "" {
 		summary = diag.Error()
 	}
 	fmt.Fprintf(&b, "Error: %s\n", summary)
+	printedRootCause := false
 	if diag.Cause != "" {
 		fmt.Fprintf(&b, "Cause: %s\n", diag.Cause)
-	} else if root := RootCause(err); root != nil && root.Error() != summary {
-		fmt.Fprintf(&b, "Cause: %s\n", root)
+	} else if rootMessage != "" && rootMessage != summary {
+		fmt.Fprintf(&b, "Cause: %s\n", rootMessage)
+		printedRootCause = true
 	}
 	for _, hint := range diag.Hints {
 		fmt.Fprintf(&b, "Hint: %s\n", hint)
 	}
-	if root := RootCause(err); root != nil && root.Error() != summary && root.Error() != diag.Cause {
-		fmt.Fprintf(&b, "Details: %s\n", root)
+	if rootMessage != "" && rootMessage != summary && rootMessage != diag.Cause && !printedRootCause {
+		fmt.Fprintf(&b, "Details: %s\n", rootMessage)
 	}
 	return b.String()
 }

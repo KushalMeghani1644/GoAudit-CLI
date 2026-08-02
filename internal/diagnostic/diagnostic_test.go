@@ -33,3 +33,23 @@ func TestFormatPlainError(t *testing.T) {
 		t.Fatalf("unexpected plain error format: %q", out)
 	}
 }
+
+func TestFormatTypedNilDiagnosticDoesNotPanic(t *testing.T) {
+	var err *Error
+	out := Format(err)
+	if out != "Error: \n" {
+		t.Fatalf("unexpected typed-nil diagnostic format: %q", out)
+	}
+}
+
+func TestFormatDiagnosticWithoutCauseDoesNotRepeatRootError(t *testing.T) {
+	err := New("Cannot start sandbox.", Wrap(errors.New("connection refused")))
+
+	out := Format(err)
+	if !strings.Contains(out, "Cause: connection refused\n") {
+		t.Fatalf("expected root error as cause, got:\n%s", out)
+	}
+	if strings.Contains(out, "Details:") {
+		t.Fatalf("did not expect repeated root error in details, got:\n%s", out)
+	}
+}
