@@ -341,12 +341,26 @@ func behaviorObservations(findings []Finding) []string {
 			add("suid-sgid", "During install, the target attempted to set SUID or SGID permission bits for elevated future execution.")
 		case "CAPABILITY_ESCALATION":
 			add("capability", "During install, the target attempted to grant Linux capabilities to an executable.")
+		case "CAPABILITY_CHANGE":
+			add("capability-change", "During install, the target used capset to modify process capabilities without a proven raise.")
 		case "NAMESPACE_ESCAPE_ATTEMPT":
 			add("namespace", "During install, the target invoked namespace tooling commonly used for sandbox or container escape attempts.")
 		case "LD_PRELOAD_PRIVILEGE_ATTEMPT":
 			add("ld-preload", "During install, the target attempted LD_PRELOAD injection against a privileged helper.")
 		case "ACCOUNT_FILE_ACCESS":
 			add("account-file", "During install, the target accessed Unix account files such as /etc/passwd or /etc/shadow.")
+		case "CREDENTIAL_READ_WITH_OUTBOUND":
+			where := f.Host
+			if where == "" {
+				where = f.IP
+			}
+			if f.Port > 0 && where != "" {
+				where = fmt.Sprintf("%s:%d", where, f.Port)
+			}
+			if where == "" {
+				where = "a non-registry host"
+			}
+			add("credential-outbound", fmt.Sprintf("During install, the target read credential-like files and later connected to %s (data send not proven).", where))
 		case "DATA_EXFIL":
 			where := f.Host
 			if where == "" {

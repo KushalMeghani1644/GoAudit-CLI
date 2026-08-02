@@ -1,6 +1,10 @@
 package project
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/diagnostic"
+)
 
 func BuildInstallCommand(manager string, mode UpgradeMode) (string, error) {
 	switch manager {
@@ -11,7 +15,11 @@ func BuildInstallCommand(manager string, mode UpgradeMode) (string, error) {
 	case ManagerBun:
 		return buildBunInstall(mode)
 	default:
-		return "", fmt.Errorf("unsupported package manager %q", manager)
+		return "", diagnostic.New(
+			fmt.Sprintf("Unsupported package manager %q.", manager),
+			diagnostic.Cause("GoAudit can only build scan-project install commands for npm, pnpm, and bun."),
+			diagnostic.Hint("Pass --manager npm, --manager pnpm, or --manager bun, or use goaudit scan with an explicit command."),
+		)
 	}
 }
 
@@ -24,7 +32,7 @@ func buildNPMInstall(mode UpgradeMode) (string, error) {
 	case UpgradeUpdate:
 		return "npm update", nil
 	default:
-		return "", fmt.Errorf("unknown upgrade mode %q", mode)
+		return "", unsupportedUpgradeModeDiagnostic(mode)
 	}
 }
 
@@ -37,7 +45,7 @@ func buildPNPMInstall(mode UpgradeMode) (string, error) {
 	case UpgradeUpdate:
 		return "pnpm update", nil
 	default:
-		return "", fmt.Errorf("unknown upgrade mode %q", mode)
+		return "", unsupportedUpgradeModeDiagnostic(mode)
 	}
 }
 
@@ -50,6 +58,14 @@ func buildBunInstall(mode UpgradeMode) (string, error) {
 	case UpgradeUpdate:
 		return "bun update", nil
 	default:
-		return "", fmt.Errorf("unknown upgrade mode %q", mode)
+		return "", unsupportedUpgradeModeDiagnostic(mode)
 	}
+}
+
+func unsupportedUpgradeModeDiagnostic(mode UpgradeMode) error {
+	return diagnostic.New(
+		fmt.Sprintf("Unknown upgrade mode %q.", mode),
+		diagnostic.Cause("The install command builder only understands refresh-lock, ncu, and update."),
+		diagnostic.Hint("Use --upgrade-mode refresh-lock, --upgrade-mode ncu, or --upgrade-mode update."),
+	)
 }

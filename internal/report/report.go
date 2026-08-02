@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/diagnostic"
 	"github.com/fatih/color"
 )
 
@@ -94,6 +95,11 @@ func NewReporter(ciMode bool, verbose bool) *Reporter {
 
 func (r *Reporter) Fatalf(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, format, args...)
+	os.Exit(1)
+}
+
+func (r *Reporter) Fatal(err error) {
+	fmt.Fprint(os.Stderr, diagnostic.Format(err))
 	os.Exit(1)
 }
 func (r *Reporter) StartProgress(message string) {
@@ -215,8 +221,8 @@ func isPrivilegeWarning(f Finding) bool {
 	}
 	switch f.ReasonCode {
 	case "PRIVILEGE_ESCALATION_ATTEMPT", "PRIVILEGE_ESCALATION_EXEC", "SUID_SGID_BIT_SET",
-		"CAPABILITY_ESCALATION", "NAMESPACE_ESCAPE_ATTEMPT", "LD_PRELOAD_PRIVILEGE_ATTEMPT",
-		"ACCOUNT_FILE_ACCESS":
+		"CAPABILITY_ESCALATION", "CAPABILITY_CHANGE", "NAMESPACE_ESCAPE_ATTEMPT", "LD_PRELOAD_PRIVILEGE_ATTEMPT",
+		"ACCOUNT_FILE_ACCESS", "MOUNT_OPERATION_ATTEMPT":
 		return true
 	default:
 		return false
@@ -224,6 +230,9 @@ func isPrivilegeWarning(f Finding) bool {
 }
 
 func isHardMalicious(f Finding) bool {
+	// ACCOUNT_FILE_ACCESS is intentionally not hard-malicious by reason code alone:
+	// failed/shadow-denied opens are warnings, and successful Critical cases still
+	// force MALICIOUS via SeverityCritical in Evaluate.
 	return f.ReasonCode == "CREDENTIAL_READ" ||
 		f.ReasonCode == "PERSISTENCE_WRITE" ||
 		f.ReasonCode == "REVERSE_SHELL" ||
@@ -232,7 +241,8 @@ func isHardMalicious(f Finding) bool {
 		f.ReasonCode == "CAPABILITY_ESCALATION" ||
 		f.ReasonCode == "NAMESPACE_ESCAPE_ATTEMPT" ||
 		f.ReasonCode == "LD_PRELOAD_PRIVILEGE_ATTEMPT" ||
-		f.ReasonCode == "ACCOUNT_FILE_ACCESS" ||
+		f.ReasonCode == "OWNERSHIP_CHANGE" ||
+		f.ReasonCode == "MOUNT_OPERATION" ||
 		f.ReasonCode == "FILELESS_EXEC" ||
 		f.ReasonCode == "PROCESS_INJECTION" ||
 		f.ReasonCode == "ENV_THEFT" ||
@@ -242,14 +252,24 @@ func isHardMalicious(f Finding) bool {
 
 func reasonWeight(reasonCode string) int {
 	switch reasonCode {
-	case "CREDENTIAL_READ", "PERSISTENCE_WRITE", "PRIVILEGE_ESCALATION", "ENV_THEFT", "DATA_EXFIL":
+	case "CREDENTIAL_READ", "PERSISTENCE_WRITE", "PRIVILEGE_ESCALATION", "ENV_THEFT", "DATA_EXFIL", "OWNERSHIP_CHANGE", "MOUNT_OPERATION":
 		return 80
 	case "ACCOUNT_FILE_ACCESS":
-		return 80
+		// Warning-level attempts (e.g. denied /etc/shadow) should be suspicious, not
+		// auto-malicious by score alone. Critical successful access still forces
+		// MALICIOUS via severity.
+		return 45
 	case "SUID_SGID_BIT_SET", "CAPABILITY_ESCALATION", "NAMESPACE_ESCAPE_ATTEMPT", "LD_PRELOAD_PRIVILEGE_ATTEMPT":
 		return 70
+	case "CAPABILITY_CHANGE":
+		// Neutral capset drop/clear — noteworthy but not hard-malicious.
+		return 30
 	case "PRIVILEGE_ESCALATION_ATTEMPT", "PRIVILEGE_ESCALATION_EXEC":
 		return 45
+	case "MOUNT_OPERATION_ATTEMPT":
+		return 45
+	case "CREDENTIAL_READ_WITH_OUTBOUND":
+		return 50
 	case "STAGED_DOWNLOADER", "SUSPICIOUS_EXEC", "SCRIPT_OBFUSCATION":
 		return 55
 	case "FILELESS_EXEC", "PROCESS_INJECTION", "SYMLINK_SENSITIVE_PATH":
