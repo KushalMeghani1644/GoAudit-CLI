@@ -58,6 +58,16 @@ Upgrade modes:
 | `ncu` | Run npm-check-updates, then install (`bun` uses `bun update`) |
 | `update` | Run the package manager's update command |
 
+**Supported project package managers:** `scan-project` supports npm, pnpm, and bun. Yarn projects (`yarn.lock`) have no `scan-project` profile, but you can audit an explicit Yarn command with `goaudit scan yarn install`. Switch to npm, pnpm, or bun only when you need `scan-project`.
+
+### Runtime probe
+
+After install, GoAudit optionally loads each package entrypoint (`require` / dynamic `import`) and runs package CLI `bin` entries with `--help` under strace. It does **not** exercise delayed timers, workers, interactive prompts, or arbitrary exported APIs. Use `--skip-probe` to disable.
+
+### Project staging
+
+`scan-project` stages install inputs (manifests/lockfiles) into the sandbox by default so install scripts cannot read host secrets via `/project-ro`. Pass `--mount-project` for a full-tree stage with known secret paths redacted. Multi-local `scan` installs refuse mounting the working directory unless `--mount-cwd` is set.
+
 ## Cache
 
 GoAudit caches prepared sandbox containers to speed up repeat scans.
