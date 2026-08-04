@@ -29,7 +29,7 @@ Living tracker for the audit findings. Status reflects the current working tree.
 |---------|--------|-------|
 | Transitive only npm lockfile | **Fixed** | npm + pnpm + bun.lock; bun.lockb unsupported warning; workspaces; flag help updated |
 | Runtime probe shallow | **Improved** | Import/require + bin `--help`; `PROBE_LIMITATION` finding; README documents limits |
-| Yarn recommended but unsupported | **Fixed (honest)** | No yarn profile; diagnostics no longer suggest `goaudit scan yarn install`; README states unsupported |
+| Yarn project profile missing | **Fixed (honest)** | `scan-project` has no Yarn profile; generic `scan` can audit an explicit Yarn command. README states the scoped limitation. |
 | Script lowercased before hash | **Fixed** | Remote hash uses original bytes; local lifecycle no longer lowercases body |
 | `--offline` / `--network off` host fetches | **Fixed** | Registry + remote scripts gated by `hostStaticNetwork` |
 | `--fail-on` typo → never fail | **Fixed** | `validateFailOn` rejects unknown values |

@@ -58,7 +58,7 @@ Upgrade modes:
 | `ncu` | Run npm-check-updates, then install (`bun` uses `bun update`) |
 | `update` | Run the package manager's update command |
 
-**Supported package managers:** npm, pnpm, and bun. Yarn projects (`yarn.lock`) are not supported by `scan-project` or `scan` (no yarn profile). Convert to npm/pnpm/bun first.
+**Supported project package managers:** `scan-project` supports npm, pnpm, and bun. Yarn projects (`yarn.lock`) have no `scan-project` profile, but you can audit an explicit Yarn command with `goaudit scan yarn install`. Switch to npm, pnpm, or bun only when you need `scan-project`.
 
 ### Runtime probe
 
