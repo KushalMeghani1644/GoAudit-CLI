@@ -836,10 +836,10 @@ func profileForManager(manager string) scanProfile {
 			Image:         nodeImage,
 			RequiredTools: []string{"bash", "strace", "node", "npm", "pnpm", "curl"},
 			SetupCommands: []string{
-				// Pin pnpm major for reproducible sandbox preparation.
-				"command -v corepack >/dev/null 2>&1 && corepack enable >/dev/null 2>&1 || true",
-				"command -v corepack >/dev/null 2>&1 && corepack prepare pnpm@9.15.9 --activate >/dev/null 2>&1 || true",
-				"command -v pnpm >/dev/null 2>&1 || npm install -g pnpm@9.15.9 >/dev/null 2>&1 || true",
+				// Pin pnpm exactly for reproducible sandbox preparation. Fall back to
+				// npm when Corepack is absent or cannot activate the requested version.
+				"if command -v corepack >/dev/null 2>&1; then corepack enable >/dev/null 2>&1 && corepack prepare pnpm@9.15.9 --activate >/dev/null 2>&1 || npm install -g pnpm@9.15.9 >/dev/null 2>&1; else npm install -g pnpm@9.15.9 >/dev/null 2>&1; fi",
+				"test \"$(pnpm --version)\" = \"9.15.9\"",
 			},
 		}
 	case "bun":
