@@ -26,6 +26,9 @@ func TestInferProfileForPackageManagers(t *testing.T) {
 	if len(pnpm.SetupCommands) == 0 {
 		t.Fatalf("expected pnpm setup commands")
 	}
+	if got := pnpm.SetupCommands[len(pnpm.SetupCommands)-1]; got != `test "$(pnpm --version)" = "9.15.9"` {
+		t.Fatalf("expected pinned pnpm version validation, got %q", got)
+	}
 
 	bun := inferProfile("bun add lodash")
 	if bun.Name != "bun" || bun.Image != bunImage {
