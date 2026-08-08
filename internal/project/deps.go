@@ -92,6 +92,42 @@ func sortedNames(names map[string]struct{}) []string {
 	return out
 }
 
+func stripJSONTrailingCommas(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	inString := false
+	escaped := false
+	for i := 0; i < len(data); i++ {
+		c := data[i]
+		if inString {
+			out = append(out, c)
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		if c == '"' {
+			inString = true
+			out = append(out, c)
+			continue
+		}
+		if c == ',' {
+			j := i + 1
+			for j < len(data) && (data[j] == ' ' || data[j] == '\t' || data[j] == '\r' || data[j] == '\n') {
+				j++
+			}
+			if j < len(data) && (data[j] == '}' || data[j] == ']') {
+				continue
+			}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 // ListTransitiveDeps returns package names from the best available lockfile.
 func (p *Project) ListTransitiveDeps() ([]string, error) {
 	specs, err := p.ListTransitiveDepSpecs()
@@ -172,7 +208,7 @@ func (p *Project) tryNPMLockSpecs() ([]DepSpec, error, bool) {
 		), true
 	}
 
-	byName := map[string]DepSpec{}
+	bySpec := map[string]DepSpec{}
 	for path, pkg := range lock.Packages {
 		if path == "" {
 			continue
@@ -184,7 +220,8 @@ func (p *Project) tryNPMLockSpecs() ([]DepSpec, error, bool) {
 		if name == "" {
 			continue
 		}
-		byName[name] = DepSpec{Name: name, Version: strings.TrimSpace(pkg.Version)}
+		spec := DepSpec{Name: name, Version: strings.TrimSpace(pkg.Version)}
+		bySpec[depSpecKey(spec)] = spec
 	}
 	// Older lockfileVersion 1 style.
 	for name, pkg := range lock.Dependencies {
@@ -192,16 +229,15 @@ func (p *Project) tryNPMLockSpecs() ([]DepSpec, error, bool) {
 		if name == "" {
 			continue
 		}
-		if _, exists := byName[name]; !exists {
-			byName[name] = DepSpec{Name: name, Version: strings.TrimSpace(pkg.Version)}
-		}
+		spec := DepSpec{Name: name, Version: strings.TrimSpace(pkg.Version)}
+		bySpec[depSpecKey(spec)] = spec
 	}
-	return sortedDepSpecs(byName), nil, true
+	return sortedDepSpecs(bySpec), nil, true
 }
 
 var (
 	pnpmPkgKeyQuoted = regexp.MustCompile(`(?m)^ {2}'([^']+)'\s*:`)
-	pnpmPkgKeyPlain  = regexp.MustCompile(`(?m)^ {2}(/?[@\w.//+-]+@[^:\s]+)\s*:`)
+	pnpmPkgKeyPlain  = regexp.MustCompile(`(?m)^ {2}(/?[@\w.//+:-]+@[^\s]+)\s*:`)
 )
 
 func (p *Project) tryPNPMLockSpecs() ([]DepSpec, error, bool) {
@@ -219,18 +255,15 @@ func (p *Project) tryPNPMLockSpecs() ([]DepSpec, error, bool) {
 		), true
 	}
 
-	// Prefer the packages: section when present.
+	// Parse from the packages: section when present. Package keys are indented,
+	// which distinguishes them from top-level YAML keys.
 	text := string(data)
 	section := text
 	if idx := strings.Index(text, "\npackages:"); idx >= 0 {
 		section = text[idx+1:]
-		// Cut at next top-level key if possible.
-		if end := regexp.MustCompile(`(?m)^[a-zA-Z]`).FindStringIndex(section[len("packages:"):]); end != nil {
-			// keep full section parse — keys under packages are indented
-		}
 	}
 
-	byName := map[string]DepSpec{}
+	bySpec := map[string]DepSpec{}
 	for _, re := range []*regexp.Regexp{pnpmPkgKeyQuoted, pnpmPkgKeyPlain} {
 		for _, m := range re.FindAllStringSubmatch(section, -1) {
 			if len(m) < 2 {
@@ -240,10 +273,11 @@ func (p *Project) tryPNPMLockSpecs() ([]DepSpec, error, bool) {
 			if name == "" {
 				continue
 			}
-			byName[name] = DepSpec{Name: name, Version: ver}
+			spec := DepSpec{Name: name, Version: ver}
+			bySpec[depSpecKey(spec)] = spec
 		}
 	}
-	return sortedDepSpecs(byName), nil, true
+	return sortedDepSpecs(bySpec), nil, true
 }
 
 // parsePnpmPackageKey parses keys like "/lodash@4.17.21", "/@scope/pkg@1.0.0(peer@1)", "lodash@4.17.21".
@@ -252,6 +286,11 @@ func parsePnpmPackageKey(key string) (name, version string) {
 	key = strings.Trim(key, "'\"")
 	key = strings.TrimPrefix(key, "/")
 	if key == "" || key == "." {
+		return "", ""
+	}
+	// Aliases such as foo@npm:bar@1.0.0 do not identify the package named by
+	// the key. Skip them instead of issuing an invalid registry package name.
+	if strings.Contains(key, "npm:") {
 		return "", ""
 	}
 	// Drop peer dependency suffix: name@version(peer@x)
@@ -296,17 +335,20 @@ func (p *Project) tryBunLockSpecs() ([]DepSpec, error, bool) {
 		), true
 	}
 
-	// bun.lock is JSON-ish; try standard JSON first.
+	// bun.lock is JSONC: normalize comments and trailing commas before decoding.
 	var lock struct {
 		Packages map[string]json.RawMessage `json:"packages"`
 	}
-	if err := json.Unmarshal(data, &lock); err != nil {
-		// Fallback: line scan for "\"name\": ["name@version"" patterns is fragile;
-		// return empty rather than failing the whole scan.
-		return nil, nil, true
+	if err := json.Unmarshal(normalizeJSONC(data), &lock); err != nil {
+		return nil, diagnostic.New(
+			fmt.Sprintf("bun.lock is not valid JSONC: %s.", lockPath),
+			diagnostic.Cause("GoAudit could not parse the lockfile to list transitive dependencies."),
+			diagnostic.Hint("Regenerate the lockfile with bun install, or rerun without --include-transitive."),
+			diagnostic.Wrap(err),
+		), true
 	}
 
-	byName := map[string]DepSpec{}
+	bySpec := map[string]DepSpec{}
 	for key, raw := range lock.Packages {
 		name := strings.TrimSpace(key)
 		// Keys may be "lodash" or "@scope/pkg".
@@ -335,9 +377,68 @@ func (p *Project) tryBunLockSpecs() ([]DepSpec, error, bool) {
 		if n, v := splitNameVersion(name); n != "" && v != "" {
 			name, ver = n, v
 		}
-		byName[name] = DepSpec{Name: name, Version: ver}
+		spec := DepSpec{Name: name, Version: ver}
+		bySpec[depSpecKey(spec)] = spec
 	}
-	return sortedDepSpecs(byName), nil, true
+	return sortedDepSpecs(bySpec), nil, true
+}
+
+// normalizeJSONC removes JSONC comments and trailing commas while preserving
+// string literals, making the result suitable for encoding/json.
+func normalizeJSONC(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	inString := false
+	escaped := false
+	for i := 0; i < len(data); i++ {
+		c := data[i]
+		if inString {
+			out = append(out, c)
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		if c == '"' {
+			inString = true
+			out = append(out, c)
+			continue
+		}
+		if c == '/' && i+1 < len(data) && data[i+1] == '/' {
+			for i < len(data) && data[i] != '\n' {
+				i++
+			}
+			if i < len(data) {
+				out = append(out, '\n')
+			}
+			continue
+		}
+		if c == '/' && i+1 < len(data) && data[i+1] == '*' {
+			i += 2
+			for i+1 < len(data) && !(data[i] == '*' && data[i+1] == '/') {
+				i++
+			}
+			if i+1 < len(data) {
+				i++
+			}
+			out = append(out, ' ')
+			continue
+		}
+		if c == ',' {
+			j := i + 1
+			for j < len(data) && (data[j] == ' ' || data[j] == '\t' || data[j] == '\r' || data[j] == '\n') {
+				j++
+			}
+			if j < len(data) && (data[j] == '}' || data[j] == ']') {
+				continue
+			}
+		}
+		out = append(out, c)
+	}
+	return stripJSONTrailingCommas(out)
 }
 
 func splitNameVersion(spec string) (name, version string) {
@@ -363,8 +464,17 @@ func sortedDepSpecs(byName map[string]DepSpec) []DepSpec {
 	for _, d := range byName {
 		out = append(out, d)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name == out[j].Name {
+			return out[i].Version < out[j].Version
+		}
+		return out[i].Name < out[j].Name
+	})
 	return out
+}
+
+func depSpecKey(spec DepSpec) string {
+	return spec.Name + "\x00" + spec.Version
 }
 
 func lockPackageNameFromPath(path string) string {

@@ -111,6 +111,77 @@ packages:
 	}
 }
 
+func TestLockParsersKeepDistinctPackageVersions(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "package.json"), `{"name":"demo"}`)
+	writeFile(t, filepath.Join(root, "package-lock.json"), `{
+		"packages": {
+			"node_modules/a": {"name": "a", "version": "1.0.0"},
+			"node_modules/b/node_modules/a": {"name": "a", "version": "2.0.0"}
+		}
+	}`)
+
+	proj, err := Open(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs, err := proj.ListTransitiveDepSpecs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 2 || specs[0] != (DepSpec{Name: "a", Version: "1.0.0"}) || specs[1] != (DepSpec{Name: "a", Version: "2.0.0"}) {
+		t.Fatalf("expected both resolved versions in name/version order, got %#v", specs)
+	}
+}
+
+func TestPnpmLockSkipsAliases(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "package.json"), `{"name":"demo"}`)
+	writeFile(t, filepath.Join(root, "pnpm-lock.yaml"), `lockfileVersion: '9.0'
+
+packages:
+  foo@npm:bar@1.0.0:
+    resolution: {integrity: sha512-test}
+  /valid@2.0.0:
+    resolution: {integrity: sha512-test}
+`)
+
+	proj, err := Open(root, "pnpm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs, err := proj.ListTransitiveDepSpecs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 1 || specs[0] != (DepSpec{Name: "valid", Version: "2.0.0"}) {
+		t.Fatalf("expected alias to be skipped, got %#v", specs)
+	}
+}
+
+func TestBunLockParsesJSONC(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "package.json"), `{"name":"demo"}`)
+	writeFile(t, filepath.Join(root, "bun.lock"), `{
+  // Bun lockfiles allow comments and trailing commas.
+  "packages": {
+    "lodash": ["lodash@4.17.21",], /* resolved package */
+  },
+}`)
+
+	proj, err := Open(root, "bun")
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs, err := proj.ListTransitiveDepSpecs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 1 || specs[0] != (DepSpec{Name: "lodash", Version: "4.17.21"}) {
+		t.Fatalf("expected JSONC bun lock to parse, got %#v", specs)
+	}
+}
+
 func TestWorkspaceDirectDeps(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "package.json"), `{
