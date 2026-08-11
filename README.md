@@ -16,8 +16,6 @@ go install github.com/KushalMeghani1644/GoAudit-CLI/cmd/goaudit@latest
 
 ## Usage
 
-<img src="assets/goaudit-demo.gif" alt="Demo">
-
 ### Scan a command
 
 Audit one install or shell command inside a Docker sandbox with strace tracing.
