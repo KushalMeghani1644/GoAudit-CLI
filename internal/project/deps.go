@@ -128,7 +128,7 @@ func stripJSONTrailingCommas(data []byte) []byte {
 	return out
 }
 
-// ListTransitiveDeps returns package names from the best available lockfile.
+// ListTransitiveDeps returns package names from the selected manager's lockfile.
 func (p *Project) ListTransitiveDeps() ([]string, error) {
 	specs, err := p.ListTransitiveDepSpecs()
 	if err != nil {
@@ -143,16 +143,18 @@ func (p *Project) ListTransitiveDeps() ([]string, error) {
 	return sortedNames(names), nil
 }
 
-// ListTransitiveDepSpecs returns resolved packages from npm/pnpm/bun lockfiles.
+// ListTransitiveDepSpecs returns resolved packages from the selected manager's lockfile.
 // Returns (nil, nil) when no supported lockfile is present.
 func (p *Project) ListTransitiveDepSpecs() ([]DepSpec, error) {
-	if specs, err, ok := p.tryNPMLockSpecs(); ok {
+	switch p.Manager {
+	case ManagerNPM:
+		specs, err, _ := p.tryNPMLockSpecs()
 		return specs, err
-	}
-	if specs, err, ok := p.tryPNPMLockSpecs(); ok {
+	case ManagerPNPM:
+		specs, err, _ := p.tryPNPMLockSpecs()
 		return specs, err
-	}
-	if specs, err, ok := p.tryBunLockSpecs(); ok {
+	case ManagerBun:
+		specs, err, _ := p.tryBunLockSpecs()
 		return specs, err
 	}
 	return nil, nil
@@ -160,19 +162,25 @@ func (p *Project) ListTransitiveDepSpecs() ([]DepSpec, error) {
 
 // TransitiveLockfileStatus describes lockfile availability for --include-transitive.
 func (p *Project) TransitiveLockfileStatus() (found bool, kind string) {
-	switch {
-	case fileExists(filepath.Join(p.Root, "package-lock.json")):
-		return true, "package-lock.json"
-	case fileExists(filepath.Join(p.Root, "pnpm-lock.yaml")):
-		return true, "pnpm-lock.yaml"
-	case fileExists(filepath.Join(p.Root, "bun.lock")):
-		return true, "bun.lock"
-	case fileExists(filepath.Join(p.Root, "bun.lockb")):
-		// Binary lockfile is not parsed; treat as present but unsupported.
-		return true, "bun.lockb"
-	default:
-		return false, ""
+	switch p.Manager {
+	case ManagerNPM:
+		if fileExists(filepath.Join(p.Root, "package-lock.json")) {
+			return true, "package-lock.json"
+		}
+	case ManagerPNPM:
+		if fileExists(filepath.Join(p.Root, "pnpm-lock.yaml")) {
+			return true, "pnpm-lock.yaml"
+		}
+	case ManagerBun:
+		switch {
+		case fileExists(filepath.Join(p.Root, "bun.lock")):
+			return true, "bun.lock"
+		case fileExists(filepath.Join(p.Root, "bun.lockb")):
+			// Binary lockfile is not parsed; treat as present but unsupported.
+			return true, "bun.lockb"
+		}
 	}
+	return false, ""
 }
 
 func (p *Project) tryNPMLockSpecs() ([]DepSpec, error, bool) {
@@ -190,14 +198,16 @@ func (p *Project) tryNPMLockSpecs() ([]DepSpec, error, bool) {
 		), true
 	}
 
+	type npmLockDependency struct {
+		Version      string                       `json:"version"`
+		Dependencies map[string]npmLockDependency `json:"dependencies"`
+	}
 	var lock struct {
 		Packages map[string]struct {
 			Name    string `json:"name"`
 			Version string `json:"version"`
 		} `json:"packages"`
-		Dependencies map[string]struct {
-			Version string `json:"version"`
-		} `json:"dependencies"`
+		Dependencies map[string]npmLockDependency `json:"dependencies"`
 	}
 	if err := json.Unmarshal(data, &lock); err != nil {
 		return nil, diagnostic.New(
@@ -223,15 +233,19 @@ func (p *Project) tryNPMLockSpecs() ([]DepSpec, error, bool) {
 		spec := DepSpec{Name: name, Version: strings.TrimSpace(pkg.Version)}
 		bySpec[depSpecKey(spec)] = spec
 	}
-	// Older lockfileVersion 1 style.
-	for name, pkg := range lock.Dependencies {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
+	// Older lockfileVersion 1 style, whose dependency graph is nested.
+	var addLegacyDeps func(map[string]npmLockDependency)
+	addLegacyDeps = func(deps map[string]npmLockDependency) {
+		for name, pkg := range deps {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				spec := DepSpec{Name: name, Version: strings.TrimSpace(pkg.Version)}
+				bySpec[depSpecKey(spec)] = spec
+			}
+			addLegacyDeps(pkg.Dependencies)
 		}
-		spec := DepSpec{Name: name, Version: strings.TrimSpace(pkg.Version)}
-		bySpec[depSpecKey(spec)] = spec
 	}
+	addLegacyDeps(lock.Dependencies)
 	return sortedDepSpecs(bySpec), nil, true
 }
 
@@ -521,17 +535,19 @@ func (p *Project) ListDepSpecsForStatic(includeTransitive bool) ([]DepSpec, erro
 		return direct, nil
 	}
 
-	// Prefer lockfile resolved versions; include any direct deps missing from lock.
-	byName := map[string]DepSpec{}
+	// Preserve every resolved lockfile version; include direct deps missing from lock.
+	bySpec := map[string]DepSpec{}
+	lockedNames := map[string]struct{}{}
 	for _, d := range transitive {
-		byName[d.Name] = d
+		bySpec[depSpecKey(d)] = d
+		lockedNames[d.Name] = struct{}{}
 	}
 	for _, d := range direct {
-		if _, ok := byName[d.Name]; !ok {
-			byName[d.Name] = d
+		if _, ok := lockedNames[d.Name]; !ok {
+			bySpec[depSpecKey(d)] = d
 		}
 	}
-	return sortedDepSpecs(byName), nil
+	return sortedDepSpecs(bySpec), nil
 }
 
 // workspacePackageDirs resolves workspace package directories from package.json.

@@ -83,9 +83,9 @@ func TestListTransitiveFromPnpmLock(t *testing.T) {
 	writeFile(t, filepath.Join(root, "pnpm-lock.yaml"), `lockfileVersion: '9.0'
 
 packages:
-  /lodash@4.17.21:
+  lodash@4.17.21:
     resolution: {integrity: sha512-test}
-  /@types/node@20.0.0:
+  '@types/node@20.0.0':
     resolution: {integrity: sha512-test}
 `)
 
@@ -132,6 +132,73 @@ func TestLockParsersKeepDistinctPackageVersions(t *testing.T) {
 	if len(specs) != 2 || specs[0] != (DepSpec{Name: "a", Version: "1.0.0"}) || specs[1] != (DepSpec{Name: "a", Version: "2.0.0"}) {
 		t.Fatalf("expected both resolved versions in name/version order, got %#v", specs)
 	}
+
+	staticSpecs, err := proj.ListDepSpecsForStatic(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(staticSpecs) != 2 || staticSpecs[0] != (DepSpec{Name: "a", Version: "1.0.0"}) || staticSpecs[1] != (DepSpec{Name: "a", Version: "2.0.0"}) {
+		t.Fatalf("expected both resolved versions in static deps, got %#v", staticSpecs)
+	}
+}
+
+func TestListTransitiveFromLegacyPackageLockIncludesNestedDependencies(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "package.json"), `{"name":"demo"}`)
+	writeFile(t, filepath.Join(root, "package-lock.json"), `{
+		"lockfileVersion": 1,
+		"dependencies": {
+			"parent": {
+				"version": "1.0.0",
+				"dependencies": {
+					"child": {"version": "2.0.0"}
+				}
+			}
+		}
+	}`)
+
+	proj, err := Open(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs, err := proj.ListTransitiveDepSpecs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []DepSpec{{Name: "child", Version: "2.0.0"}, {Name: "parent", Version: "1.0.0"}}
+	if len(specs) != len(want) || specs[0] != want[0] || specs[1] != want[1] {
+		t.Fatalf("expected nested legacy lock deps %#v, got %#v", want, specs)
+	}
+}
+
+func TestTransitiveLockfileUsesSelectedManager(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "package.json"), `{"name":"demo"}`)
+	writeFile(t, filepath.Join(root, "package-lock.json"), `{
+		"packages": {"node_modules/stale": {"name": "stale", "version": "1.0.0"}}
+	}`)
+	writeFile(t, filepath.Join(root, "pnpm-lock.yaml"), `lockfileVersion: '9.0'
+
+packages:
+  current@2.0.0:
+    resolution: {integrity: sha512-test}
+`)
+
+	proj, err := Open(root, ManagerPNPM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs, err := proj.ListTransitiveDepSpecs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 1 || specs[0] != (DepSpec{Name: "current", Version: "2.0.0"}) {
+		t.Fatalf("expected pnpm lock deps, got %#v", specs)
+	}
+	found, kind := proj.TransitiveLockfileStatus()
+	if !found || kind != "pnpm-lock.yaml" {
+		t.Fatalf("expected pnpm lockfile status, got %v %q", found, kind)
+	}
 }
 
 func TestPnpmLockSkipsAliases(t *testing.T) {
@@ -142,7 +209,7 @@ func TestPnpmLockSkipsAliases(t *testing.T) {
 packages:
   foo@npm:bar@1.0.0:
     resolution: {integrity: sha512-test}
-  /valid@2.0.0:
+  valid@2.0.0:
     resolution: {integrity: sha512-test}
 `)
 
