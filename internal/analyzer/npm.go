@@ -552,27 +552,12 @@ func localPackagePath(spec string) string {
 	return filepath.Clean(spec)
 }
 
+// normalizeNPMPackageName returns the registry package name for a spec,
+// resolving npm alias specs ("alias@npm:actual@1.2.3") to the actual
+// package npm installs.
 func normalizeNPMPackageName(spec string) string {
-	spec = strings.TrimSpace(spec)
-	if spec == "" {
-		return ""
-	}
-	if strings.HasPrefix(spec, "npm:") {
-		spec = strings.TrimPrefix(spec, "npm:")
-	}
-	if strings.HasPrefix(spec, "@") {
-		if strings.Count(spec, "@") > 1 {
-			last := strings.LastIndex(spec, "@")
-			if last > 0 {
-				return spec[:last]
-			}
-		}
-		return spec
-	}
-	if idx := strings.Index(spec, "@"); idx > 0 {
-		return spec[:idx]
-	}
-	return spec
+	name, _ := splitPackageSpec(spec)
+	return strings.TrimSpace(name)
 }
 
 type localPackageJSON struct {

@@ -279,3 +279,10 @@ func findByReasonCode(findings []report.Finding, code string) *report.Finding {
 	}
 	return nil
 }
+
+func TestExtractPackageNamesFromCommandResolvesAlias(t *testing.T) {
+	names := ExtractPackageNamesFromCommand("npm install alias@npm:lodash@4.17.21")
+	if len(names) != 1 || names[0] != "lodash" {
+		t.Fatalf("expected alias target name, got %v", names)
+	}
+}
