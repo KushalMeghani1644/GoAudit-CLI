@@ -295,6 +295,8 @@ func analyzeRegistrySpec(client *http.Client, spec, manager string) []report.Fin
 
 // splitPackageSpec returns the package name and optional version/range/tag from a
 // install spec such as "lodash@4.17.21", "@scope/pkg@^1.0.0", or "lodash".
+// npm alias specs ("alias@npm:actual@1.2.3") are resolved to the actual
+// package so registry analysis targets what npm really installs.
 func splitPackageSpec(spec string) (name, version string) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
@@ -302,6 +304,9 @@ func splitPackageSpec(spec string) (name, version string) {
 	}
 	if strings.HasPrefix(spec, "npm:") {
 		spec = strings.TrimPrefix(spec, "npm:")
+	}
+	if idx := strings.Index(spec, "@npm:"); idx >= 0 && idx+5 < len(spec) {
+		return splitPackageSpec(spec[idx+len("@npm:"):])
 	}
 	if strings.HasPrefix(spec, "@") {
 		if strings.Count(spec, "@") > 1 {
@@ -793,13 +798,12 @@ func RewriteSingleLocalPackageInstall(command string) (string, string, bool) {
 	if len(parts) < 3 {
 		return "", "", false
 	}
-	// Preserve leading wrappers in the rewritten command string.
+	// Preserve leading wrappers (sudo, env, FOO=bar assignments, ...) in the
+	// rewritten command so sandbox execution keeps the original environment.
 	prefix := ""
-	if len(rawParts) > len(parts) {
-		// Reconstruct is imperfect for env assignments; rewrite only the manager tail.
-		prefix = ""
+	if n := len(rawParts) - len(parts); n > 0 {
+		prefix = strings.Join(rawParts[:n], " ") + " "
 	}
-	_ = prefix
 	for _, m := range managers {
 		if strings.ToLower(parts[0]) != m.name {
 			continue
@@ -848,7 +852,7 @@ func RewriteSingleLocalPackageInstall(command string) (string, string, bool) {
 			return "", "", false
 		}
 		parts[localIdx] = "."
-		return strings.Join(parts, " "), absPath, true
+		return prefix + strings.Join(parts, " "), absPath, true
 	}
 	return "", "", false
 }

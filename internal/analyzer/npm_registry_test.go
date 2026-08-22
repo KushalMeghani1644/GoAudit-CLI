@@ -46,6 +46,33 @@ func TestAnalyzeRegistryPackagesUsesRegistry(t *testing.T) {
 	}
 }
 
+func TestAnalyzeRegistryPackagesResolvesNPMAliasTarget(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/actual-package" {
+			t.Errorf("metadata requested for %q, want target package /actual-package", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"dist-tags": {"latest": "1.2.3"},
+			"versions": {
+				"1.2.3": {"scripts": {"postinstall": "node setup.js"}}
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	old := npmRegistryBaseURL
+	npmRegistryBaseURL = srv.URL
+	defer func() { npmRegistryBaseURL = old }()
+
+	findings := AnalyzeRegistryPackages([]string{"alias@npm:actual-package@1.2.3"}, "npm")
+	if findByReasonCode(findings, "NPM_LIFECYCLE_SCRIPT_METADATA") == nil {
+		t.Fatalf("expected lifecycle finding for alias target, got %#v", findings)
+	}
+}
+
 func TestCLIInstallCoverageLimitFinding(t *testing.T) {
 	// Build more specs than the cap; local paths avoid network.
 	var specs []string

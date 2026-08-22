@@ -239,6 +239,38 @@ func TestRewriteSingleLocalPackageInstallExpandsHome(t *testing.T) {
 	}
 }
 
+func TestSplitPackageSpecAliasResolvesTarget(t *testing.T) {
+	name, ver := splitPackageSpec("alias@npm:lodash@4.17.21")
+	if name != "lodash" || ver != "4.17.21" {
+		t.Fatalf("unexpected alias resolution: %q %q", name, ver)
+	}
+	name, ver = splitPackageSpec("@scope/alias@npm:@scope/lodash@^1.0.0")
+	if name != "@scope/lodash" || ver != "^1.0.0" {
+		t.Fatalf("unexpected scoped alias resolution: %q %q", name, ver)
+	}
+}
+
+func TestRewriteSingleLocalPackageInstallPreservesWrappers(t *testing.T) {
+	dir := t.TempDir()
+	pkg := `{"name":"local-name","version":"1.0.0"}`
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	command := "env NPM_CONFIG_REGISTRY=http://registry npm install " + dir
+	rewritten, projectPath, ok := RewriteSingleLocalPackageInstall(command)
+	if !ok {
+		t.Fatal("expected rewrite to succeed")
+	}
+	want := "env NPM_CONFIG_REGISTRY=http://registry npm install ."
+	if rewritten != want {
+		t.Fatalf("unexpected rewritten command: %s", rewritten)
+	}
+	if projectPath != dir {
+		t.Fatalf("unexpected project path: %s", projectPath)
+	}
+}
+
 func findByReasonCode(findings []report.Finding, code string) *report.Finding {
 	for i := range findings {
 		if findings[i].ReasonCode == code {
