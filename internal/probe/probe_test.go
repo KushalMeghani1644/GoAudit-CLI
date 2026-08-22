@@ -36,6 +36,23 @@ func TestGenerateNodeProbeScriptSinglePackage(t *testing.T) {
 	}
 }
 
+func TestProbeScriptWorkspaceProbesBins(t *testing.T) {
+	script := GenerateNodeProbeScript([]string{"lodash"}, 15)
+	if !strings.Contains(script, `require("/workspace");console.error("GOAUDIT_PROBE_IMPORT_OK:"+pkg);_probeBins("/workspace");`) {
+		t.Fatal("expected workspace import success path to probe declared bins")
+	}
+}
+
+func TestProbeScriptFallbackResolvesPackageRoot(t *testing.T) {
+	script := GenerateNodeProbeScript([]string{"lodash"}, 15)
+	if !strings.Contains(script, `_path.dirname(require.resolve(pkg+"/package.json"))`) {
+		t.Fatal("expected primary root resolution via pkg/package.json")
+	}
+	if !strings.Contains(script, `if(_fs.existsSync(_path.join(d,"package.json")))return d;`) {
+		t.Fatal("expected fallback to walk up to directory containing package.json")
+	}
+}
+
 func TestGenerateNodeProbeScriptScopedPackage(t *testing.T) {
 	script := GenerateNodeProbeScript([]string{"@scope/pkg", "lodash"}, 10)
 	if !strings.Contains(script, `"@scope/pkg"`) {

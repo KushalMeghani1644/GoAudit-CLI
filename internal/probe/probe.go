@@ -30,9 +30,10 @@ func GenerateNodeProbeScript(packages []string, timeoutSec int) string {
 			`var _cp=require("child_process");`+
 			`var _pkgs=%s;`+
 			`function _tryWorkspace(pkg){try{var p=JSON.parse(_fs.readFileSync("/workspace/package.json","utf8"));`+
-			`if(p&&p.name===pkg){require("/workspace");console.error("GOAUDIT_PROBE_IMPORT_OK:"+pkg);return true;}}catch(e){}return false;}`+
+			`if(p&&p.name===pkg){require("/workspace");console.error("GOAUDIT_PROBE_IMPORT_OK:"+pkg);_probeBins("/workspace");return true;}}catch(e){}return false;}`+
 			`function _resolvePkgRoot(pkg){try{return _path.dirname(require.resolve(pkg+"/package.json"));}catch(e){`+
-			`try{return _path.dirname(require.resolve(pkg));}catch(e2){return null;}}}`+
+			`try{var d=_path.dirname(require.resolve(pkg));for(var g=0;g<20;g++){if(_fs.existsSync(_path.join(d,"package.json")))return d;`+
+			`var up=_path.dirname(d);if(up===d)break;d=up;}return null;}catch(e2){return null;}}}`+
 			`function _binEntries(pkgRoot){try{var pj=JSON.parse(_fs.readFileSync(_path.join(pkgRoot,"package.json"),"utf8"));`+
 			`if(!pj||!pj.bin)return[];if(typeof pj.bin==="string")return[pj.bin];return Object.keys(pj.bin).map(function(k){return pj.bin[k];});}catch(e){return[];}}`+
 			`function _probeBins(pkg){var root=_resolvePkgRoot(pkg);if(!root)return;`+
