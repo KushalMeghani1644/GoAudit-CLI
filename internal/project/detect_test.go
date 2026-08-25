@@ -57,7 +57,8 @@ func TestYarnLockRejected(t *testing.T) {
 	for _, want := range []string{
 		"Error: Yarn projects are not supported by scan-project yet.",
 		"Cause: Found yarn.lock",
-		"Hint: Use goaudit scan with an explicit yarn command",
+		"Hint: Convert the project to npm, pnpm, or bun",
+		"Yarn is not supported by goaudit scan either",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected yarn diagnostic to contain %q, got:\n%s", want, out)
@@ -100,6 +101,9 @@ func TestManagerOverride(t *testing.T) {
 
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}

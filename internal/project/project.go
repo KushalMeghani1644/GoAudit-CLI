@@ -173,8 +173,8 @@ func detectManager(root string, manifest packageManifest, override string) (stri
 		return "", diagnostic.New(
 			"Yarn projects are not supported by scan-project yet.",
 			diagnostic.Cause(fmt.Sprintf("Found yarn.lock in %s, but scan-project currently supports npm, pnpm, and bun.", root)),
-			diagnostic.Hint("Use goaudit scan with an explicit yarn command, for example: goaudit scan yarn install."),
-			diagnostic.Hint("Alternatively switch the project to npm, pnpm, or bun and rerun scan-project."),
+			diagnostic.Hint("Convert the project to npm, pnpm, or bun (for example: npm install) and rerun scan-project."),
+			diagnostic.Hint("Yarn is not supported by goaudit scan either (no yarn profile/image); do not use goaudit scan yarn install."),
 		)
 	}
 
