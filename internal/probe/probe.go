@@ -45,7 +45,7 @@ func GenerateNodeProbeScript(packages []string, timeoutSec int) string {
 			`child.on("exit",function(code,signal){if(!settled){settled=true;clearTimeout(t);resolve(signal===null&&code===0);}});});}`+
 			`async function _probeBins(pkg){var root=_resolvePkgRoot(pkg);if(!root)return;`+
 			`var entries=_binEntries(root);for(var i=0;i<entries.length;i++){var rel=entries[i];var bin=_path.join(root,rel);`+
-			`try{if(!_fs.existsSync(bin))continue;`+
+			`try{if(!_fs.existsSync(bin)){console.error("GOAUDIT_PROBE_BIN_FAIL:"+pkg+":"+rel+":missing");continue;}`+
 			`if(await _runBin(bin,["--help"])){console.error("GOAUDIT_PROBE_BIN_OK:"+pkg+":"+rel);}`+
 			`else{console.error("GOAUDIT_PROBE_BIN_FAIL:"+pkg+":"+rel);}}catch(e){console.error("GOAUDIT_PROBE_BIN_FAIL:"+pkg+":"+rel);}}}`+
 			`(async function(){for(var i=0;i<_pkgs.length;i++){`+

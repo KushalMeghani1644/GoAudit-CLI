@@ -69,6 +69,13 @@ func TestProbeScriptChecksBinExitStatus(t *testing.T) {
 	}
 }
 
+func TestProbeScriptReportsMissingBinAsFailure(t *testing.T) {
+	script := GenerateNodeProbeScript([]string{"lodash"}, 15)
+	if !strings.Contains(script, `if(!_fs.existsSync(bin)){console.error("GOAUDIT_PROBE_BIN_FAIL:"+pkg+":"+rel+":missing");continue;}`) {
+		t.Fatal("expected missing declared bin to emit GOAUDIT_PROBE_BIN_FAIL before continue")
+	}
+}
+
 func TestProbeScriptFallbackResolvesPackageRoot(t *testing.T) {
 	script := GenerateNodeProbeScript([]string{"lodash"}, 15)
 	if !strings.Contains(script, `_path.dirname(require.resolve(pkg+"/package.json"))`) {
