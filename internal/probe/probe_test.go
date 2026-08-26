@@ -38,8 +38,34 @@ func TestGenerateNodeProbeScriptSinglePackage(t *testing.T) {
 
 func TestProbeScriptWorkspaceProbesBins(t *testing.T) {
 	script := GenerateNodeProbeScript([]string{"lodash"}, 15)
-	if !strings.Contains(script, `require("/workspace");console.error("GOAUDIT_PROBE_IMPORT_OK:"+pkg);_probeBins("/workspace");`) {
+	if !strings.Contains(script, `require("/workspace");console.error("GOAUDIT_PROBE_IMPORT_OK:"+pkg);await _probeBins("/workspace");`) {
 		t.Fatal("expected workspace import success path to probe declared bins")
+	}
+}
+
+func TestProbeScriptUsesAsyncSpawnWithSharedDeadline(t *testing.T) {
+	script := GenerateNodeProbeScript([]string{"lodash"}, 15)
+	if strings.Contains(script, "spawnSync") {
+		t.Fatal("expected no spawnSync: it blocks the event loop per binary")
+	}
+	if !strings.Contains(script, `_cp.spawn(bin,args,{env:process.env,stdio:"ignore"})`) {
+		t.Fatal("expected async spawn for bin probes")
+	}
+	if !strings.Contains(script, `var _deadline=Date.now()+15000;`) {
+		t.Fatal("expected one shared deadline across all binary probes")
+	}
+	if !strings.Contains(script, `if(r<=0){clearTimeout(_timer);console.error("GOAUDIT_PROBE_TIMEOUT");process.exit(124);}`) {
+		t.Fatal("expected shared deadline to emit GOAUDIT_PROBE_TIMEOUT before exit")
+	}
+}
+
+func TestProbeScriptChecksBinExitStatus(t *testing.T) {
+	script := GenerateNodeProbeScript([]string{"lodash"}, 15)
+	if !strings.Contains(script, `resolve(signal===null&&code===0)`) {
+		t.Fatal("expected bin probe success to require clean exit (no signal, code 0)")
+	}
+	if !strings.Contains(script, `child.on("error",function(){`) {
+		t.Fatal("expected spawn errors to be reported as failures")
 	}
 }
 
