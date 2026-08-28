@@ -71,14 +71,20 @@ func (s *Sandbox) SetContainerID(id string) { s.containerID = id }
 // imageTagIsFloating reports tags that should be re-pulled rather than reused from a
 // potentially stale local cache (mutable distro/runtime rolling tags).
 func imageTagIsFloating(imageRef string) bool {
-	_, tag, ok := strings.Cut(imageRef, ":")
-	if !ok || tag == "" {
+	// A digest makes the reference immutable even if it also includes a mutable tag.
+	if strings.Contains(imageRef, "@") {
 		return false
 	}
-	// Digest pins are immutable.
-	if strings.HasPrefix(tag, "sha256:") {
+
+	// A registry hostname may contain a port, so only a colon after the final
+	// slash can introduce an image tag.
+	lastSlash := strings.LastIndex(imageRef, "/")
+	lastColon := strings.LastIndex(imageRef, ":")
+	if lastColon <= lastSlash || lastColon == len(imageRef)-1 {
 		return false
 	}
+	tag := imageRef[lastColon+1:]
+
 	switch tag {
 	case "latest", "current", "current-slim", "stable", "edge", "nightly":
 		return true

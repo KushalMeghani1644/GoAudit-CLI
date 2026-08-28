@@ -72,20 +72,27 @@ func TestResetMutableStateScript(t *testing.T) {
 }
 
 func TestImageTagIsFloating(t *testing.T) {
-	if !imageTagIsFloating("node:current-slim") {
-		t.Fatal("expected node:current-slim to be floating")
+	tests := []struct {
+		name     string
+		imageRef string
+		want     bool
+	}{
+		{name: "current tag", imageRef: "node:current-slim", want: true},
+		{name: "latest tag", imageRef: "ubuntu:latest", want: true},
+		{name: "registry qualified latest tag", imageRef: "ghcr.io/kushalmeghani1644/goaudit-node-sandbox:latest", want: true},
+		{name: "registry port and floating tag", imageRef: "localhost:5000/example/img:edge", want: true},
+		{name: "pinned tag", imageRef: "node:20.18.0", want: false},
+		{name: "untagged registry port", imageRef: "localhost:5000/example/img", want: false},
+		{name: "digest", imageRef: "node@sha256:abc", want: false},
+		{name: "tag with digest", imageRef: "node:latest@sha256:abc", want: false},
+		{name: "legacy digest-shaped tag", imageRef: "ghcr.io/example/img:sha256:deadbeef", want: false},
 	}
-	if !imageTagIsFloating("ubuntu:latest") {
-		t.Fatal("expected :latest to be floating")
-	}
-	if imageTagIsFloating("node:20.18.0") {
-		t.Fatal("did not expect pinned tag to be floating")
-	}
-	if imageTagIsFloating("node@sha256:abc") {
-		// no colon tag form used here; digest form with :sha256:
-		t.Log("skipped @ digest form")
-	}
-	if imageTagIsFloating("ghcr.io/example/img:sha256:deadbeef") {
-		t.Fatal("digest tag should not be treated as floating")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := imageTagIsFloating(tt.imageRef); got != tt.want {
+				t.Fatalf("imageTagIsFloating(%q) = %v, want %v", tt.imageRef, got, tt.want)
+			}
+		})
 	}
 }
