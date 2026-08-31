@@ -75,16 +75,22 @@ func imageTagIsFloating(imageRef string) bool {
 	if strings.Contains(imageRef, "@") {
 		return false
 	}
-
-	// A registry hostname may contain a port, so only a colon after the final
-	// slash can introduce an image tag.
-	lastSlash := strings.LastIndex(imageRef, "/")
-	lastColon := strings.LastIndex(imageRef, ":")
-	if lastColon <= lastSlash || lastColon == len(imageRef)-1 {
-		return false
+	// The tag, when present, is the part after the last colon in the final
+	// path segment (registry hosts may themselves contain a :port).
+	segment := imageRef
+	if idx := strings.LastIndex(segment, "/"); idx >= 0 {
+		segment = segment[idx+1:]
 	}
-	tag := imageRef[lastColon+1:]
-
+	colon := strings.LastIndex(segment, ":")
+	if colon < 0 {
+		// Untagged references resolve to the mutable "latest" tag.
+		return true
+	}
+	tag := segment[colon+1:]
+	if tag == "" {
+		// Malformed trailing colon; treat like an untagged reference.
+		return true
+	}
 	switch tag {
 	case "latest", "current", "current-slim", "stable", "edge", "nightly":
 		return true
@@ -517,23 +523,46 @@ echo "GOAUDIT_WARM_READY" >&2
 	return nil
 }
 
+// sandboxHomeGuardScript defines a shell helper that reports whether a path is
+// a dedicated home directory that may be recursively wiped between warm cached
+// scans. A misconfigured cacheable image (for example uid 1000 with home /)
+// must never cause the reset to delete top-level system directories.
+func sandboxHomeGuardScript() string {
+	return `goaudit_home_is_dedicated() {
+  case "$(cd "${1:-/goaudit-nonexistent}" 2>/dev/null && pwd)" in
+  ""|/|//|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/media|/mnt|/opt|/proc|/run|/sbin|/srv|/sys|/tmp|/usr|/var|/workspace)
+    return 1
+    ;;
+  *)
+    return 0
+    ;;
+  esac
+}
+`
+}
+
 // resetMutableStateScript clears user-writable state left by a prior scan so
 // warm-container reuse does not leak configs, caches, or PATH-controlled files.
 // System binaries under /usr are not restored here; run-as-root scans should not
 // reuse warm caches (see pipeline cache gating).
 func resetMutableStateScript() string {
-	return `
+	return fmt.Sprintf(`
 # --- goaudit: reset mutable state between cached scans ---
 rm -rf /tmp/* /tmp/.[!.]* /tmp/..?* /var/tmp/* /var/tmp/.[!.]* /var/tmp/..?* 2>/dev/null || true
+%s
 if [ -n "${SANDBOX_HOME:-}" ] && [ -d "${SANDBOX_HOME}" ]; then
-  # Wipe home contents (including package-manager caches and user configs).
-  find "${SANDBOX_HOME}" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+  if goaudit_home_is_dedicated "${SANDBOX_HOME}"; then
+    # Wipe home contents (including package-manager caches and user configs).
+    find "${SANDBOX_HOME}" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+  else
+    echo "GOAUDIT_RUNTIME_META:home_reset=skipped;reason=unsafe_sandbox_home" >&2
+  fi
 fi
 # Common non-home caches that installers may create.
 rm -rf /root/.npm /root/.cache /root/.config /root/.local /root/.bun /root/.pnpm-store 2>/dev/null || true
 rm -rf /home/*/.npm /home/*/.cache /home/*/.config /home/*/.local /home/*/.bun 2>/dev/null || true
 rm -rf /usr/local/share/.cache 2>/dev/null || true
-`
+`, sandboxHomeGuardScript())
 }
 
 // ExecScan runs a scan command on an already-prepared (warm) container.
