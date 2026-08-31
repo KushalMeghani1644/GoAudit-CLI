@@ -1,9 +1,11 @@
 package sandbox
 
 import (
+	"context"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHoneypotScript(t *testing.T) {
@@ -124,8 +126,8 @@ func TestResetMutableStateScriptRejectsSystemHomePaths(t *testing.T) {
 	// a dedicated, existing home directory must still be accepted.
 	unsafe := []string{
 		"/", "//", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32",
-		"/lib64", "/media", "/mnt", "/opt", "/proc", "/run", "/sbin", "/srv",
-		"/sys", "/tmp", "/usr", "/var", "/workspace",
+		"/lib64", "/media", "/mnt", "/opt", "/proc", "/root", "/run", "/sbin",
+		"/srv", "/sys", "/tmp", "/usr", "/var", "/workspace",
 	}
 	dedicated := t.TempDir()
 	check := sandboxHomeGuardScript() + `
@@ -147,11 +149,16 @@ if ! goaudit_home_is_dedicated "$DEDICATED/nested"; then
 fi
 exit $failed
 `
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	args := append([]string{"-c", check, "goaudit-home-guard-test"}, unsafe...)
-	cmd := exec.Command("bash", args...)
+	cmd := exec.CommandContext(ctx, "bash", args...)
 	cmd.Env = append(cmd.Environ(), "DEDICATED="+dedicated)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() != nil {
+			t.Fatalf("sandbox home guard test timed out:\n%s", out)
+		}
 		t.Fatalf("sandbox home guard misclassified paths:\n%s", out)
 	}
 }

@@ -525,12 +525,13 @@ echo "GOAUDIT_WARM_READY" >&2
 
 // sandboxHomeGuardScript defines a shell helper that reports whether a path is
 // a dedicated home directory that may be recursively wiped between warm cached
-// scans. A misconfigured cacheable image (for example uid 1000 with home /)
-// must never cause the reset to delete top-level system directories.
+// scans. A misconfigured cacheable image (for example uid 1000 with home / or
+// /root) must never cause the reset to delete top-level system directories or
+// root's home; root runs do not reuse warm caches (see pipeline cache gating).
 func sandboxHomeGuardScript() string {
 	return `goaudit_home_is_dedicated() {
   case "$(cd "${1:-/goaudit-nonexistent}" 2>/dev/null && pwd)" in
-  ""|/|//|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/media|/mnt|/opt|/proc|/run|/sbin|/srv|/sys|/tmp|/usr|/var|/workspace)
+  ""|/|//|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var|/workspace)
     return 1
     ;;
   *)
