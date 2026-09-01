@@ -98,6 +98,11 @@ func TestExtractInstallSpecsStopsAtShellSeparators(t *testing.T) {
 		"npm install pkg && echo done",
 		"npm install pkg ; echo done",
 		"npm install pkg | cat",
+		// Separators without surrounding spaces must tokenize the same way.
+		"npm install pkg||echo retry",
+		"npm install pkg&&echo done",
+		"npm install pkg;echo done",
+		"npm install pkg|cat",
 	}
 	for _, cmd := range cases {
 		specs, partial := extractInstallSpecsFull(cmd, "npm", []string{"install", "i"})
@@ -108,6 +113,15 @@ func TestExtractInstallSpecsStopsAtShellSeparators(t *testing.T) {
 			t.Fatalf("cmd %q: expected partial parse flag", cmd)
 		}
 	}
+
+	// Separators inside a quoted token are literal, not clause boundaries.
+	specs, partial := extractInstallSpecsFull(`npm install "pkg&&name"`, "npm", []string{"install", "i"})
+	if len(specs) != 1 || specs[0] != "pkg&&name" {
+		t.Fatalf("quoted separator: expected [pkg&&name], got %#v", specs)
+	}
+	if partial {
+		t.Fatal("quoted separator: did not expect partial parse flag")
+	}
 }
 
 func TestExtractInstallSpecsSudoUserFlag(t *testing.T) {
@@ -115,6 +129,8 @@ func TestExtractInstallSpecsSudoUserFlag(t *testing.T) {
 		"sudo -u user npm install lodash",
 		"sudo -u user npm install --save lodash",
 		"sudo --user=user npm install lodash",
+		"sudo --user user npm install lodash",
+		"sudo --group group npm install lodash",
 		"sudo -E npm install lodash",
 	}
 	for _, cmd := range cases {

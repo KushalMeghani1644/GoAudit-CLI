@@ -488,11 +488,51 @@ func isShellSeparator(p string) bool {
 }
 
 func unquotedFields(command string) []string {
-	fields := strings.Fields(command)
-	for i := range fields {
-		fields[i] = unquoteToken(fields[i])
+	var fields []string
+	for _, raw := range strings.Fields(command) {
+		unquoted := unquoteToken(raw)
+		if unquoted != raw {
+			// Quoted token: shell separators inside it are literal.
+			fields = append(fields, unquoted)
+			continue
+		}
+		fields = append(fields, splitShellSeparators(raw)...)
 	}
 	return fields
+}
+
+// splitShellSeparators splits a whitespace-delimited token at shell separators
+// written without surrounding spaces, so "evil&&echo" yields
+// ["evil", "&&", "echo"] and separator handling matches the spaced form.
+func splitShellSeparators(token string) []string {
+	var out []string
+	start := 0
+	for i := 0; i < len(token); {
+		var sep string
+		switch {
+		case strings.HasPrefix(token[i:], "&&"):
+			sep = "&&"
+		case strings.HasPrefix(token[i:], "||"):
+			sep = "||"
+		case token[i] == '|':
+			sep = "|"
+		case token[i] == ';':
+			sep = ";"
+		default:
+			i++
+			continue
+		}
+		if i > start {
+			out = append(out, token[start:i])
+		}
+		out = append(out, sep)
+		i += len(sep)
+		start = i
+	}
+	if start < len(token) {
+		out = append(out, token[start:])
+	}
+	return out
 }
 
 // extractInstallSpecsFull is extractInstallSpecs and additionally reports
@@ -545,6 +585,15 @@ func unquoteToken(p string) string {
 	return p
 }
 
+// sudoLongValueOpts are sudo long options that take their value as a separate
+// token (`sudo --user user npm ...`); the `--opt=value` form is one token and
+// handled separately.
+var sudoLongValueOpts = map[string]struct{}{
+	"--close-from": {}, "--chdir": {}, "--chroot": {}, "--group": {},
+	"--host": {}, "--prompt": {}, "--role": {}, "--type": {},
+	"--command-timeout": {}, "--user": {}, "--other-user": {},
+}
+
 // stripCommandWrappers removes leading sudo/env/corepack wrappers and FOO=bar
 // assignments so "env FOO=1 npm install pkg" still yields package specs.
 // This is intentionally not a full shell parser.
@@ -563,15 +612,17 @@ func stripCommandWrappers(parts []string) []string {
 		lower := strings.ToLower(p)
 		if lower == "sudo" {
 			i++
-			// sudo options: skip flags; short flags taking a separate value
-			// (-u user, -g group, -p prompt, ...) consume the next token.
+			// sudo options: skip flags; flags taking a separate value
+			// (-u user, --user user, -g group, ...) consume the next token.
 			for i < len(parts) && strings.HasPrefix(parts[i], "-") {
 				flag := parts[i]
 				i++
 				if strings.Contains(flag, "=") {
 					continue
 				}
-				if len(flag) == 2 && strings.ContainsRune("CDghpRtTuU", rune(flag[1])) && i < len(parts) {
+				_, longValueOpt := sudoLongValueOpts[flag]
+				shortValueOpt := len(flag) == 2 && strings.ContainsRune("CDghpRrtTuU", rune(flag[1]))
+				if (longValueOpt || shortValueOpt) && i < len(parts) {
 					i++
 				}
 			}
