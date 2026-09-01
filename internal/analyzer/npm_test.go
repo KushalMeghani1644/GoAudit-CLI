@@ -1,6 +1,8 @@
 package analyzer
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,6 +92,39 @@ func TestExtractInstallSpecsQuotedAndWrappers(t *testing.T) {
 	}
 }
 
+func TestExtractInstallSpecsStopsAtShellSeparators(t *testing.T) {
+	cases := []string{
+		"npm install pkg || echo retry",
+		"npm install pkg && echo done",
+		"npm install pkg ; echo done",
+		"npm install pkg | cat",
+	}
+	for _, cmd := range cases {
+		specs, partial := extractInstallSpecsFull(cmd, "npm", []string{"install", "i"})
+		if len(specs) != 1 || specs[0] != "pkg" {
+			t.Fatalf("cmd %q: expected [pkg], got %#v", cmd, specs)
+		}
+		if !partial {
+			t.Fatalf("cmd %q: expected partial parse flag", cmd)
+		}
+	}
+}
+
+func TestExtractInstallSpecsSudoUserFlag(t *testing.T) {
+	cases := []string{
+		"sudo -u user npm install lodash",
+		"sudo -u user npm install --save lodash",
+		"sudo --user=user npm install lodash",
+		"sudo -E npm install lodash",
+	}
+	for _, cmd := range cases {
+		specs := extractInstallSpecs(cmd, "npm", []string{"install", "i"})
+		if len(specs) != 1 || specs[0] != "lodash" {
+			t.Fatalf("cmd %q: expected [lodash], got %#v", cmd, specs)
+		}
+	}
+}
+
 func TestPackageParseIncompleteFinding(t *testing.T) {
 	f, ok := packageParseIncompleteFinding(`sh -c "npm install $(echo lodash)"`)
 	if !ok {
@@ -100,6 +135,74 @@ func TestPackageParseIncompleteFinding(t *testing.T) {
 	}
 	if _, ok := packageParseIncompleteFinding("npm install lodash"); ok {
 		t.Fatal("did not expect incomplete finding for simple install")
+	}
+	// Unknown wrappers with package args must not pass silently.
+	if _, ok := packageParseIncompleteFinding("unshare -r npm install lodash"); !ok {
+		t.Fatal("expected PACKAGE_PARSE_INCOMPLETE for unknown wrapper with package args")
+	}
+	if _, ok := packageParseIncompleteFinding("npm install"); ok {
+		t.Fatal("did not expect incomplete finding for bare npm install")
+	}
+}
+
+func TestAnalyzeJSPackageManagersPartialParse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/lodash" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"dist-tags": {"latest": "4.17.21"},
+			"time": {"created": "2010-01-01T00:00:00.000Z"},
+			"versions": {
+				"4.17.21": {"scripts": {"postinstall": "node foo.js"}}
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	old := npmRegistryBaseURL
+	npmRegistryBaseURL = srv.URL
+	defer func() { npmRegistryBaseURL = old }()
+
+	cases := []string{
+		"npm install lodash || echo retry",
+		"npm install lodash | cat",
+		"npm install lodash && npm install express",
+	}
+	for _, cmd := range cases {
+		findings := AnalyzeJSPackageManagers(cmd)
+		if findByReasonCode(findings, "NPM_LIFECYCLE_SCRIPT_METADATA") == nil {
+			t.Fatalf("cmd %q: expected lifecycle finding for first segment, got %#v", cmd, findings)
+		}
+		f := findByReasonCode(findings, "PACKAGE_PARSE_INCOMPLETE")
+		if f == nil {
+			t.Fatalf("cmd %q: expected PACKAGE_PARSE_INCOMPLETE for partial parse, got %#v", cmd, findings)
+		}
+	}
+	// A simple command must not be flagged as a partial parse.
+	if findings := AnalyzeJSPackageManagers("npm install lodash"); findByReasonCode(findings, "PACKAGE_PARSE_INCOMPLETE") != nil {
+		t.Fatalf("unexpected PACKAGE_PARSE_INCOMPLETE for simple install: %#v", findings)
+	}
+}
+
+func TestSelectVersionToAnalyzeVPrefixed(t *testing.T) {
+	meta := &npmMetadata{
+		DistTags: map[string]string{"latest": "2.0.0"},
+		Versions: map[string]struct {
+			Scripts map[string]string `json:"scripts"`
+		}{
+			"1.2.3": {},
+			"2.0.0": {},
+		},
+	}
+	v, ev, approx := selectVersionToAnalyze(meta, "v1.2.3")
+	if v != "1.2.3" || approx {
+		t.Fatalf("expected v1.2.3 to resolve to 1.2.3, got %s approx=%v (%s)", v, approx, ev)
+	}
+	if !isConcreteVersion("v1.2.3") || !isConcreteVersion("V1.2.3") {
+		t.Fatal("v-prefixed versions should be concrete")
 	}
 }
 

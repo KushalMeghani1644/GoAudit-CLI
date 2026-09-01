@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -36,12 +37,35 @@ type npmMetadata struct {
 	} `json:"versions"`
 }
 
+type packageManagerOps struct {
+	name string
+	ops  []string
+}
+
+// jsPackageManagers lists the JavaScript package managers and the
+// subcommands that install registry packages.
+var jsPackageManagers = []packageManagerOps{
+	{"npm", []string{"install", "i"}},
+	{"pnpm", []string{"add", "install", "i"}},
+	{"bun", []string{"add"}},
+}
+
 func AnalyzeJSPackageManagers(command string) []report.Finding {
 	var findings []report.Finding
-	findings = append(findings, AnalyzeNPMInstall(command)...)
-	findings = append(findings, analyzePNPMInstall(command)...)
-	findings = append(findings, analyzeBUNAdd(command)...)
-	if len(findings) == 0 {
+	partial := false
+	anySpecs := false
+	for _, m := range jsPackageManagers {
+		specs, p := extractInstallSpecsFull(command, m.name, m.ops)
+		partial = partial || p
+		if len(specs) > 0 {
+			anySpecs = true
+			findings = append(findings, analyzeRegistryBackedSpecs(specs, m.name, cliRegistrySpecCap)...)
+		}
+	}
+	switch {
+	case partial && anySpecs:
+		findings = append(findings, packageParsePartialFinding(command))
+	case !anySpecs:
 		if f, ok := packageParseIncompleteFinding(command); ok {
 			findings = append(findings, f)
 		}
@@ -50,50 +74,28 @@ func AnalyzeJSPackageManagers(command string) []report.Finding {
 }
 
 func AnalyzeNPMInstall(command string) []report.Finding {
-	specs := extractInstallSpecs(command, "npm", []string{"install", "i"})
+	specs, _ := extractInstallSpecsFull(command, "npm", []string{"install", "i"})
 	if len(specs) == 0 {
 		return nil
 	}
 	return analyzeRegistryBackedSpecs(specs, "npm", cliRegistrySpecCap)
 }
 
-func analyzePNPMInstall(command string) []report.Finding {
-	specs := extractInstallSpecs(command, "pnpm", []string{"add", "install", "i"})
-	if len(specs) == 0 {
-		return nil
-	}
-	return analyzeRegistryBackedSpecs(specs, "pnpm", cliRegistrySpecCap)
-}
-
-func analyzeBUNAdd(command string) []report.Finding {
-	specs := extractInstallSpecs(command, "bun", []string{"add"})
-	if len(specs) == 0 {
-		return nil
-	}
-	return analyzeRegistryBackedSpecs(specs, "bun", cliRegistrySpecCap)
-}
-
 // packageParseIncompleteFinding emits an honest coverage warning when the command
 // looks like a package-manager install but package extraction found nothing
 // (pipes, command substitution, heavy quoting, unknown wrappers).
 func packageParseIncompleteFinding(command string) (report.Finding, bool) {
-	lc := strings.ToLower(command)
-	looksLikeInstall := (strings.Contains(lc, "npm") && (strings.Contains(lc, " install") || strings.Contains(lc, " i ") || strings.HasSuffix(lc, " i"))) ||
-		(strings.Contains(lc, "pnpm") && (strings.Contains(lc, " add") || strings.Contains(lc, " install"))) ||
-		(strings.Contains(lc, "bun") && strings.Contains(lc, " add"))
-	if !looksLikeInstall {
+	if !commandLooksLikeJSInstall(command) {
 		return report.Finding{}, false
 	}
 	// If we can extract any specs, parsing worked.
-	if len(extractInstallSpecs(command, "npm", []string{"install", "i"})) > 0 ||
-		len(extractInstallSpecs(command, "pnpm", []string{"add", "install", "i"})) > 0 ||
-		len(extractInstallSpecs(command, "bun", []string{"add"})) > 0 {
-		return report.Finding{}, false
+	for _, m := range jsPackageManagers {
+		if specs, _ := extractInstallSpecsFull(command, m.name, m.ops); len(specs) > 0 {
+			return report.Finding{}, false
+		}
 	}
 	// Bare "npm install" with no package args is valid (uses package.json) — not incomplete.
-	if !strings.ContainsAny(command, "|$`") && !strings.Contains(command, "$(") {
-		// Still may be wrappers we don't understand with package args.
-		// Only warn when shell metacharacters suggest bypass.
+	if !installCommandHasUnparsedArgs(command) {
 		return report.Finding{}, false
 	}
 	return report.Finding{
@@ -104,6 +106,79 @@ func packageParseIncompleteFinding(command string) (report.Finding, bool) {
 		Confidence: 70,
 		Evidence:   "Package-manager install command detected but package specs could not be extracted (quoting, pipes, substitutions, or unknown wrappers); registry static analysis skipped for specs",
 	}, true
+}
+
+// packageParsePartialFinding reports when spec extraction stopped at a shell
+// separator while further command tokens remain, even though the first
+// segment's specs were analyzed.
+func packageParsePartialFinding(command string) report.Finding {
+	return report.Finding{
+		Severity:   report.SeverityWarning,
+		Type:       "policy",
+		ReasonCode: "PACKAGE_PARSE_INCOMPLETE",
+		Path:       command,
+		Confidence: 70,
+		Evidence:   "Install command continues past a shell separator (|, ||, &&, or ;); only the first segment's package specs were statically analyzed",
+	}
+}
+
+// commandLooksLikeJSInstall reports whether the command mentions a JavaScript
+// package manager install invocation anywhere in its text.
+func commandLooksLikeJSInstall(command string) bool {
+	lc := strings.ToLower(command)
+	return (strings.Contains(lc, "npm") && (strings.Contains(lc, " install") || strings.Contains(lc, " i ") || strings.HasSuffix(lc, " i"))) ||
+		(strings.Contains(lc, "pnpm") && (strings.Contains(lc, " add") || strings.Contains(lc, " install"))) ||
+		(strings.Contains(lc, "bun") && strings.Contains(lc, " add"))
+}
+
+// installCommandHasUnparsedArgs reports whether the command likely carries
+// package arguments the spec extractor failed to parse: a non-flag token
+// after a manager install op, or shell metacharacters that can hide packages.
+func installCommandHasUnparsedArgs(command string) bool {
+	if installOpHasCandidateArgs(command) {
+		return true
+	}
+	return strings.ContainsAny(command, "|$`")
+}
+
+// installOpHasCandidateArgs reports whether the token stream contains a
+// manager install op followed by a non-flag token (a candidate package spec).
+func installOpHasCandidateArgs(command string) bool {
+	parts := stripCommandWrappers(unquotedFields(command))
+	for i := 0; i < len(parts); i++ {
+		var ops []string
+		for _, m := range jsPackageManagers {
+			if strings.ToLower(parts[i]) == m.name {
+				ops = m.ops
+				break
+			}
+		}
+		if ops == nil {
+			continue
+		}
+		for j := i + 1; j < len(parts); j++ {
+			if isShellSeparator(parts[j]) {
+				break
+			}
+			if slices.Contains(ops, parts[j]) {
+				for k := j + 1; k < len(parts); k++ {
+					if isShellSeparator(parts[k]) {
+						break
+					}
+					if !strings.HasPrefix(parts[k], "-") {
+						return true
+					}
+				}
+				return false
+			}
+			if !strings.HasPrefix(parts[j], "-") {
+				// Non-flag token between manager and op: not an install
+				// invocation of this manager.
+				break
+			}
+		}
+	}
+	return false
 }
 
 func AnalyzeRegistryPackages(pkgs []string, manager string) []report.Finding {
@@ -323,10 +398,21 @@ func splitPackageSpec(spec string) (name, version string) {
 	return spec, ""
 }
 
-// isConcreteVersion reports whether v looks like an exact registry version
-// (not a range/tag with operators).
-func isConcreteVersion(v string) bool {
+// canonicalNPMVersion strips a leading "v" from an exact version so spec
+// forms like pkg@v1.2.3 match registry version keys ("1.2.3").
+func canonicalNPMVersion(v string) string {
 	v = strings.TrimSpace(v)
+	if len(v) >= 2 && (v[0] == 'v' || v[0] == 'V') && v[1] >= '0' && v[1] <= '9' {
+		return v[1:]
+	}
+	return v
+}
+
+// isConcreteVersion reports whether v looks like an exact registry version
+// (not a range/tag with operators). A "v" prefix is accepted: pkg@v1.2.3
+// resolves to the concrete registry version 1.2.3.
+func isConcreteVersion(v string) bool {
+	v = canonicalNPMVersion(v)
 	if v == "" {
 		return false
 	}
@@ -358,6 +444,12 @@ func selectVersionToAnalyze(meta *npmMetadata, requested string) (version, evide
 		if _, ok := meta.Versions[requested]; ok {
 			return requested, "analyzed requested version " + requested, false
 		}
+		// Spec used a v-prefix ("v1.2.3"); registry version keys are unprefixed.
+		if canonical := canonicalNPMVersion(requested); canonical != requested {
+			if _, ok := meta.Versions[canonical]; ok {
+				return canonical, "analyzed requested version " + canonical, false
+			}
+		}
 		if latest != "" {
 			return latest, fmt.Sprintf("requested version %s not present in metadata; fell back to dist-tags.latest %s", requested, latest), true
 		}
@@ -385,35 +477,50 @@ func managerReason(manager, suffix string) string {
 }
 
 func extractInstallSpecs(command, manager string, operations []string) []string {
-	rawParts := strings.Fields(command)
-	for i := range rawParts {
-		rawParts[i] = unquoteToken(rawParts[i])
+	specs, _ := extractInstallSpecsFull(command, manager, operations)
+	return specs
+}
+
+// isShellSeparator reports whether the token terminates the install command
+// segment and starts another shell clause or fallback command.
+func isShellSeparator(p string) bool {
+	return p == "&&" || p == ";" || p == "|" || p == "||"
+}
+
+func unquotedFields(command string) []string {
+	fields := strings.Fields(command)
+	for i := range fields {
+		fields[i] = unquoteToken(fields[i])
 	}
-	parts := stripCommandWrappers(rawParts)
+	return fields
+}
+
+// extractInstallSpecsFull is extractInstallSpecs and additionally reports
+// whether extraction stopped at a shell separator while further command
+// tokens remain unanalyzed (pipes, ||, &&, ;).
+func extractInstallSpecsFull(command, manager string, operations []string) (specs []string, partial bool) {
+	parts := stripCommandWrappers(unquotedFields(command))
 	if len(parts) < 2 || strings.ToLower(parts[0]) != manager {
-		return nil
+		return nil, false
 	}
 
 	installIdx := -1
 	for i := 1; i < len(parts); i++ {
-		for _, op := range operations {
-			if parts[i] == op {
-				installIdx = i
-				break
-			}
-		}
-		if installIdx != -1 {
+		if slices.Contains(operations, parts[i]) {
+			installIdx = i
 			break
 		}
 	}
 	if installIdx == -1 {
-		return nil
+		return nil, false
 	}
 
-	var specs []string
 	for i := installIdx + 1; i < len(parts); i++ {
 		p := parts[i]
-		if p == "&&" || p == ";" || p == "|" {
+		if isShellSeparator(p) {
+			// Tokens after the separator belong to a shell clause or
+			// fallback command the analyzer does not inspect.
+			partial = i+1 < len(parts)
 			break
 		}
 		if strings.HasPrefix(p, "-") {
@@ -425,7 +532,7 @@ func extractInstallSpecs(command, manager string, operations []string) []string 
 		}
 		specs = append(specs, p)
 	}
-	return specs
+	return specs, partial
 }
 
 // unquoteToken strips a single layer of matching single/double quotes from a token.
@@ -454,6 +561,22 @@ func stripCommandWrappers(parts []string) []string {
 	for i < len(parts) {
 		p := parts[i]
 		lower := strings.ToLower(p)
+		if lower == "sudo" {
+			i++
+			// sudo options: skip flags; short flags taking a separate value
+			// (-u user, -g group, -p prompt, ...) consume the next token.
+			for i < len(parts) && strings.HasPrefix(parts[i], "-") {
+				flag := parts[i]
+				i++
+				if strings.Contains(flag, "=") {
+					continue
+				}
+				if len(flag) == 2 && strings.ContainsRune("CDghpRtTuU", rune(flag[1])) && i < len(parts) {
+					i++
+				}
+			}
+			continue
+		}
 		if _, ok := wrappers[lower]; ok {
 			i++
 			// `command -v` / `time -p` style: skip dashed flags.
@@ -811,7 +934,7 @@ func RewriteSingleLocalPackageInstall(command string) (string, string, bool) {
 		localIdx := -1
 		localCount := 0
 		for i := installIdx + 1; i < len(parts); i++ {
-			if parts[i] == "&&" || parts[i] == ";" || parts[i] == "|" {
+			if isShellSeparator(parts[i]) {
 				break
 			}
 			if strings.HasPrefix(parts[i], "-") {

@@ -73,6 +73,43 @@ func TestAnalyzeRegistryPackagesResolvesNPMAliasTarget(t *testing.T) {
 	}
 }
 
+func TestAnalyzeRegistryPackagesResolvesVPrefixedVersion(t *testing.T) {
+	// v1.2.3 (requested) and latest (2.0.0) have different scripts: the
+	// analyzer must inspect the requested version, not dist-tags.latest.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/pkg" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"dist-tags": {"latest": "2.0.0"},
+			"time": {"created": "2010-01-01T00:00:00.000Z"},
+			"versions": {
+				"1.2.3": {"scripts": {"postinstall": "node setup.js"}},
+				"2.0.0": {"scripts": {"postinstall": "echo ok"}}
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	old := npmRegistryBaseURL
+	npmRegistryBaseURL = srv.URL
+	defer func() { npmRegistryBaseURL = old }()
+
+	findings := AnalyzeRegistryPackages([]string{"pkg@v1.2.3"}, "npm")
+	lifecycle := findByReasonCode(findings, "NPM_LIFECYCLE_SCRIPT_METADATA")
+	if lifecycle == nil {
+		t.Fatalf("expected lifecycle finding for requested version, got %#v", findings)
+	}
+	if lifecycle.Path != "pkg@1.2.3" {
+		t.Fatalf("expected analysis of pkg@1.2.3, got path %q", lifecycle.Path)
+	}
+	if findByReasonCode(findings, "NPM_VERSION_RESOLUTION_APPROXIMATE") != nil {
+		t.Fatalf("v-prefixed concrete version should not be approximate: %#v", findings)
+	}
+}
+
 func TestCLIInstallCoverageLimitFinding(t *testing.T) {
 	// Build more specs than the cap; local paths avoid network.
 	var specs []string
