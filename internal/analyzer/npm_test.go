@@ -103,6 +103,10 @@ func TestExtractInstallSpecsStopsAtShellSeparators(t *testing.T) {
 		"npm install pkg&&echo done",
 		"npm install pkg;echo done",
 		"npm install pkg|cat",
+		// Quoted words adjacent to separators must be unquoted first.
+		`npm install "pkg"&&echo done`,
+		`npm install 'pkg'&&echo done`,
+		`npm install "pkg" && echo done`,
 	}
 	for _, cmd := range cases {
 		specs, partial := extractInstallSpecsFull(cmd, "npm", []string{"install", "i"})
@@ -121,6 +125,15 @@ func TestExtractInstallSpecsStopsAtShellSeparators(t *testing.T) {
 	}
 	if partial {
 		t.Fatal("quoted separator: did not expect partial parse flag")
+	}
+
+	// Local-path arguments adjacent to separators keep their path form.
+	specs, partial = extractInstallSpecsFull("npm install ./pkg&&echo done", "npm", []string{"install", "i"})
+	if len(specs) != 1 || specs[0] != "./pkg" {
+		t.Fatalf("local path: expected [./pkg], got %#v", specs)
+	}
+	if !partial {
+		t.Fatal("local path: expected partial parse flag")
 	}
 }
 

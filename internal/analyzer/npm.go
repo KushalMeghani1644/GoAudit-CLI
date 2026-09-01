@@ -487,52 +487,72 @@ func isShellSeparator(p string) bool {
 	return p == "&&" || p == ";" || p == "|" || p == "||"
 }
 
+// unquotedFields tokenizes the command like a minimal shell lexer: unquoted
+// whitespace splits words, quotes group text and are stripped, a backslash
+// escapes the next character, and unquoted shell separators (&&, ||, |, ;)
+// become their own tokens even without surrounding spaces, so
+// `install "lodash"&&echo` yields ["install", "lodash", "&&", "echo"].
+// This is intentionally not a full shell parser.
 func unquotedFields(command string) []string {
-	var fields []string
-	for _, raw := range strings.Fields(command) {
-		unquoted := unquoteToken(raw)
-		if unquoted != raw {
-			// Quoted token: shell separators inside it are literal.
-			fields = append(fields, unquoted)
+	var (
+		fields []string
+		cur    strings.Builder
+		inWord bool
+		quote  byte // 0 when unquoted, otherwise '\'' or '"'
+	)
+	flush := func() {
+		if inWord {
+			fields = append(fields, cur.String())
+			cur.Reset()
+			inWord = false
+		}
+	}
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		if quote != 0 {
+			switch {
+			case c == quote:
+				quote = 0
+			case quote == '"' && c == '\\' && i+1 < len(command):
+				i++
+				cur.WriteByte(command[i])
+			default:
+				cur.WriteByte(c)
+			}
 			continue
 		}
-		fields = append(fields, splitShellSeparators(raw)...)
-	}
-	return fields
-}
-
-// splitShellSeparators splits a whitespace-delimited token at shell separators
-// written without surrounding spaces, so "evil&&echo" yields
-// ["evil", "&&", "echo"] and separator handling matches the spaced form.
-func splitShellSeparators(token string) []string {
-	var out []string
-	start := 0
-	for i := 0; i < len(token); {
-		var sep string
 		switch {
-		case strings.HasPrefix(token[i:], "&&"):
-			sep = "&&"
-		case strings.HasPrefix(token[i:], "||"):
-			sep = "||"
-		case token[i] == '|':
-			sep = "|"
-		case token[i] == ';':
-			sep = ";"
-		default:
+		case c == '\'' || c == '"':
+			quote = c
+			inWord = true // empty quotes still form a token
+		case c == '\\' && i+1 < len(command):
 			i++
-			continue
+			cur.WriteByte(command[i])
+			inWord = true
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f':
+			flush()
+		case c == ';':
+			flush()
+			fields = append(fields, ";")
+		case c == '&' && i+1 < len(command) && command[i+1] == '&':
+			flush()
+			fields = append(fields, "&&")
+			i++
+		case c == '|':
+			flush()
+			if i+1 < len(command) && command[i+1] == '|' {
+				fields = append(fields, "||")
+				i++
+			} else {
+				fields = append(fields, "|")
+			}
+		default:
+			cur.WriteByte(c)
+			inWord = true
 		}
-		if i > start {
-			out = append(out, token[start:i])
-		}
-		out = append(out, sep)
-		i += len(sep)
-		start = i
 	}
-	if start < len(token) {
-		out = append(out, token[start:])
-	}
-	return out
+	flush()
+	return fields
 }
 
 // extractInstallSpecsFull is extractInstallSpecs and additionally reports
@@ -573,16 +593,6 @@ func extractInstallSpecsFull(command, manager string, operations []string) (spec
 		specs = append(specs, p)
 	}
 	return specs, partial
-}
-
-// unquoteToken strips a single layer of matching single/double quotes from a token.
-func unquoteToken(p string) string {
-	if len(p) >= 2 {
-		if (p[0] == '"' && p[len(p)-1] == '"') || (p[0] == '\'' && p[len(p)-1] == '\'') {
-			return p[1 : len(p)-1]
-		}
-	}
-	return p
 }
 
 // sudoLongValueOpts are sudo long options that take their value as a separate
