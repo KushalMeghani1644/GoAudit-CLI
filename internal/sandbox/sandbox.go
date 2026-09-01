@@ -68,9 +68,44 @@ func (s *Sandbox) NetworkEnabled() bool     { return s.networkEnabled }
 func (s *Sandbox) ContainerID() string      { return s.containerID }
 func (s *Sandbox) SetContainerID(id string) { s.containerID = id }
 
+// imageTagIsFloating reports tags that should be re-pulled rather than reused from a
+// potentially stale local cache (mutable distro/runtime rolling tags).
+func imageTagIsFloating(imageRef string) bool {
+	// A digest makes the reference immutable even if it also includes a mutable tag.
+	if strings.Contains(imageRef, "@") {
+		return false
+	}
+	// The tag, when present, is the part after the last colon in the final
+	// path segment (registry hosts may themselves contain a :port).
+	segment := imageRef
+	if idx := strings.LastIndex(segment, "/"); idx >= 0 {
+		segment = segment[idx+1:]
+	}
+	colon := strings.LastIndex(segment, ":")
+	if colon < 0 {
+		// Untagged references resolve to the mutable "latest" tag.
+		return true
+	}
+	tag := segment[colon+1:]
+	if tag == "" {
+		// Malformed trailing colon; treat like an untagged reference.
+		return true
+	}
+	switch tag {
+	case "latest", "current", "current-slim", "stable", "edge", "nightly":
+		return true
+	}
+	// node:current-slim style where the tag contains "current".
+	if strings.Contains(tag, "current") {
+		return true
+	}
+	return false
+}
+
 func (s *Sandbox) EnsureImage(ctx context.Context) (string, error) {
-	// Always pull :latest tags to pick up newly published sandbox images.
-	if !strings.HasSuffix(s.image, ":latest") {
+	// Always pull floating tags (:latest, :current-slim, …) so local caches cannot
+	// silently pin an old mutable image. Non-floating tags are reused if present.
+	if !imageTagIsFloating(s.image) {
 		if _, err := s.cli.ImageInspect(ctx, s.image); err == nil {
 			return s.InspectImageDigest(ctx, s.image)
 		} else if !cerrdefs.IsNotFound(err) {
@@ -162,7 +197,7 @@ func (s *Sandbox) RunProjectCommand(ctx context.Context, targetCmd, probeScript,
 }
 
 // StraceTraceSet is the full set of syscalls traced by GoAudit.
-const StraceTraceSet = "open,openat,openat2,connect,execve,chmod,fchmod,fchmodat,rename,unlink,unlinkat,setuid,setgid,setreuid,setregid,setresuid,setresgid,setgroups,socket,bind,listen,symlink,symlinkat,memfd_create,ptrace,sendto,sendmsg"
+const StraceTraceSet = "open,openat,openat2,connect,execve,chmod,fchmod,fchmodat,rename,renameat,renameat2,link,linkat,mkdir,mkdirat,unlink,unlinkat,truncate,ftruncate,chown,fchown,lchown,fchownat,mount,umount2,capset,setuid,setgid,setreuid,setregid,setresuid,setresgid,setgroups,socket,bind,listen,symlink,symlinkat,memfd_create,ptrace,sendto,sendmsg,sendmmsg,sendfile,splice"
 
 const targetTimeout = "180s"
 const defaultProbeTimeout = "30s"
@@ -488,6 +523,49 @@ echo "GOAUDIT_WARM_READY" >&2
 	return nil
 }
 
+// sandboxHomeGuardScript defines a shell helper that reports whether a path is
+// a dedicated home directory that may be recursively wiped between warm cached
+// scans. A misconfigured cacheable image (for example uid 1000 with home / or
+// /root) must never cause the reset to delete top-level system directories or
+// root's home; root runs do not reuse warm caches (see pipeline cache gating).
+func sandboxHomeGuardScript() string {
+	return `goaudit_home_is_dedicated() {
+  case "$(cd "${1:-/goaudit-nonexistent}" 2>/dev/null && pwd)" in
+  ""|/|//|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var|/workspace)
+    return 1
+    ;;
+  *)
+    return 0
+    ;;
+  esac
+}
+`
+}
+
+// resetMutableStateScript clears user-writable state left by a prior scan so
+// warm-container reuse does not leak configs, caches, or PATH-controlled files.
+// System binaries under /usr are not restored here; run-as-root scans should not
+// reuse warm caches (see pipeline cache gating).
+func resetMutableStateScript() string {
+	return fmt.Sprintf(`
+# --- goaudit: reset mutable state between cached scans ---
+rm -rf /tmp/* /tmp/.[!.]* /tmp/..?* /var/tmp/* /var/tmp/.[!.]* /var/tmp/..?* 2>/dev/null || true
+%s
+if [ -n "${SANDBOX_HOME:-}" ] && [ -d "${SANDBOX_HOME}" ]; then
+  if goaudit_home_is_dedicated "${SANDBOX_HOME}"; then
+    # Wipe home contents (including package-manager caches and user configs).
+    find "${SANDBOX_HOME}" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+  else
+    echo "GOAUDIT_RUNTIME_META:home_reset=skipped;reason=unsafe_sandbox_home" >&2
+  fi
+fi
+# Common non-home caches that installers may create.
+rm -rf /root/.npm /root/.cache /root/.config /root/.local /root/.bun /root/.pnpm-store 2>/dev/null || true
+rm -rf /home/*/.npm /home/*/.cache /home/*/.config /home/*/.local /home/*/.bun 2>/dev/null || true
+rm -rf /usr/local/share/.cache 2>/dev/null || true
+`, sandboxHomeGuardScript())
+}
+
 // ExecScan runs a scan command on an already-prepared (warm) container.
 // The container should have been created by PrepareWarm and be in a stopped state.
 func (s *Sandbox) ExecScan(ctx context.Context, targetCmd, probeScript, profileName, img string, projectPath string, targetTimeoutValue, probeTimeoutValue string) (io.Reader, error) {
@@ -508,7 +586,7 @@ func (s *Sandbox) ExecScan(ctx context.Context, targetCmd, probeScript, profileN
 		}
 	}
 
-	// Re-apply honeypots in case a previous scan deleted them.
+	// Resolve sandbox user home, wipe residual state from prior scans, then re-honeypot.
 	userSetup := ""
 	if s.runAsRoot {
 		userSetup = `SANDBOX_HOME="/root"` + "\n"
@@ -550,6 +628,7 @@ done
 
 %s
 %s
+%s
 
 rm -rf /workspace/* /workspace/.[!.]* /workspace/..?* 2>/dev/null || true
 mkdir -p /workspace
@@ -562,7 +641,7 @@ cd /workspace
 if [ "${GOAUDIT_TARGET_RC:-0}" -ne 0 ]; then
   exit 99
 fi
-`, profileName, img, userSetup, honeypotScript(), workspaceHoneypotScript(), scriptHeredoc("/tmp/target.sh", targetCmd, "GOAUDIT_TARGET"), execLine, probeLine)
+`, profileName, img, userSetup, resetMutableStateScript(), honeypotScript(), workspaceHoneypotScript(), scriptHeredoc("/tmp/target.sh", targetCmd, "GOAUDIT_TARGET"), execLine, probeLine)
 
 	execCfg := container.ExecOptions{
 		AttachStderr: true,

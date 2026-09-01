@@ -28,6 +28,32 @@ func TestCacheKey(t *testing.T) {
 	}
 }
 
+func TestNetworkModeMatchesPolicy(t *testing.T) {
+	tests := []struct {
+		mode   string
+		net    bool
+		wantOK bool
+	}{
+		// Offline cache key requires NetworkMode none.
+		{"none", false, true},
+		{"bridge", false, false},
+		{"", false, false},
+		{"default", false, false},
+		// Online cache key accepts any non-none mode (including Docker default).
+		{"none", true, false},
+		{"bridge", true, true},
+		{"", true, true},
+		{"default", true, true},
+		{"goaudit-net", true, true},
+	}
+	for _, tt := range tests {
+		got := networkModeMatchesPolicy(tt.mode, tt.net)
+		if got != tt.wantOK {
+			t.Errorf("networkModeMatchesPolicy(%q, %t) = %t, want %t", tt.mode, tt.net, got, tt.wantOK)
+		}
+	}
+}
+
 func TestCacheDataLoadSave(t *testing.T) {
 	dir := t.TempDir()
 	filePath := filepath.Join(dir, "cache.json")

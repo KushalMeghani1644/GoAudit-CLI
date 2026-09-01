@@ -133,8 +133,9 @@ func (cm *CacheManager) Lookup(ctx context.Context, runtime, profile string, run
 		return nil
 	}
 
-	// Check container still exists.
-	if !cm.containerExists(ctx, entry.ContainerID) {
+	// Check container still exists and network mode matches the cache key policy.
+	// Historical bug: warm containers were stored under net=true but created offline.
+	if !cm.containerExists(ctx, entry.ContainerID) || !cm.containerNetworkMatches(ctx, entry.ContainerID, networkEnabled) {
 		delete(cm.data.Containers, key)
 		_ = cm.saveLocked()
 		return nil
@@ -402,6 +403,28 @@ func (cm *CacheManager) removeEntryLocked(ctx context.Context, key string) {
 func (cm *CacheManager) containerExists(ctx context.Context, containerID string) bool {
 	_, err := cm.cli.ContainerInspect(ctx, containerID)
 	return err == nil
+}
+
+// containerNetworkMatches reports whether the live container's network mode agrees
+// with the requested networkEnabled policy (none ↔ offline, anything else ↔ online).
+// When network is enabled, Docker's default/bridge/custom modes all count as online;
+// only NetworkMode "none" is offline.
+func (cm *CacheManager) containerNetworkMatches(ctx context.Context, containerID string, networkEnabled bool) bool {
+	inspect, err := cm.cli.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return false
+	}
+	return networkModeMatchesPolicy(string(inspect.HostConfig.NetworkMode), networkEnabled)
+}
+
+// networkModeMatchesPolicy reports whether a Docker NetworkMode string agrees with
+// the requested networkEnabled policy.
+func networkModeMatchesPolicy(mode string, networkEnabled bool) bool {
+	isNone := mode == "none"
+	if networkEnabled {
+		return !isNone
+	}
+	return isNone
 }
 
 func (cm *CacheManager) stopAndRemoveContainer(ctx context.Context, containerID string) error {
