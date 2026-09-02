@@ -34,11 +34,18 @@ func GenerateNodeProbeScript(packages []string, timeoutSec int) string {
 			`function _killChildren(){for(var i=0;i<_children.length;i++){try{_children[i].kill("SIGKILL");}catch(e){}}_children=[];}`+
 			`async function _tryWorkspace(pkg){var p;try{p=JSON.parse(_fs.readFileSync("/workspace/package.json","utf8"));}catch(e){return false;}`+
 			`if(!p||p.name!==pkg)return false;var loaded=false;try{require("/workspace");loaded=true;}catch(e1){`+
-			`var cands=[];if(typeof p.main==="string")cands.push(p.main);cands.push("index.js","index.mjs");`+
+			// Fallback entries are only valid when the manifest declares no main;
+			// a present-but-broken main must not be masked by index.js.
+			`var cands=[];if(typeof p.main==="string"){cands.push(p.main);}else{cands.push("index.js","index.mjs");}`+
 			`for(var i=0;i<cands.length&&!loaded;i++){try{await import(_url.pathToFileURL(_path.resolve("/workspace",cands[i])).href);loaded=true;}catch(e2){}}}`+
 			`if(loaded){console.error("GOAUDIT_PROBE_IMPORT_OK:"+pkg);}else{console.error("GOAUDIT_PROBE_IMPORT_FAILED:"+pkg+":ERR_LOAD");}`+
 			`try{await _probeBins("/workspace",pkg);}catch(e){}return true;}`+
-			`function _resolvePkgRoot(pkg){try{return _path.dirname(require.resolve(pkg+"/package.json"));}catch(e){`+
+			`function _resolvePkgRoot(pkg){`+
+			// Installed packages live under NODE_PATH; check there first so root
+			// resolution does not depend on the package exporting ./package.json.
+			`var direct=_path.join("/workspace/node_modules",pkg);`+
+			`if(_fs.existsSync(_path.join(direct,"package.json")))return direct;`+
+			`try{return _path.dirname(require.resolve(pkg+"/package.json"));}catch(e){`+
 			`try{var d=_path.dirname(require.resolve(pkg));var first=null;`+
 			`for(var g=0;g<20;g++){`+
 			`if(_fs.existsSync(_path.join(d,"package.json"))){`+
@@ -62,9 +69,15 @@ func GenerateNodeProbeScript(packages []string, timeoutSec int) string {
 			`if(await _runBin(bin,["--help"])){console.error("GOAUDIT_PROBE_BIN_OK:"+label+":"+rel);}`+
 			`else{console.error("GOAUDIT_PROBE_BIN_FAIL:"+label+":"+rel);}}catch(e){console.error("GOAUDIT_PROBE_BIN_FAIL:"+label+":"+rel);}}}`+
 			`(async function(){for(var i=0;i<_pkgs.length;i++){`+
-			`try{require(_pkgs[i]);console.error("GOAUDIT_PROBE_IMPORT_OK:"+_pkgs[i]);await _probeBins(_pkgs[i]);}catch(e){`+
-			`try{await import(_pkgs[i]);console.error("GOAUDIT_PROBE_IMPORT_OK:"+_pkgs[i]);await _probeBins(_pkgs[i]);}`+
-			`catch(e2){if(!(await _tryWorkspace(_pkgs[i]))){console.error("GOAUDIT_PROBE_IMPORT_FAILED:"+_pkgs[i]+":"+((e2&&e2.code)||"ERR"));}}}}`+
+			// Bin probing runs from the resolved installed root regardless of
+			// whether the entry point imports, so packages that fail to load
+			// still get their declared CLI bins exercised.
+			`var _ok=false,_err=null,_root=null;`+
+			`try{require(_pkgs[i]);_ok=true;}catch(e){_err=e;}`+
+			`if(!_ok){try{await import(_pkgs[i]);_ok=true;}catch(e2){_err=e2;}}`+
+			`if(_ok){console.error("GOAUDIT_PROBE_IMPORT_OK:"+_pkgs[i]);_root=_resolvePkgRoot(_pkgs[i]);if(_root){try{await _probeBins(_root,_pkgs[i]);}catch(e3){}}}`+
+			`else if(!(await _tryWorkspace(_pkgs[i]))){console.error("GOAUDIT_PROBE_IMPORT_FAILED:"+_pkgs[i]+":"+((_err&&_err.code)||"ERR"));`+
+			`_root=_resolvePkgRoot(_pkgs[i]);if(_root){try{await _probeBins(_root,_pkgs[i]);}catch(e3){}}}}`+
 			`console.error("GOAUDIT_PROBE_LIMITATION:import_and_bin_help_only");`+
 			`clearTimeout(_timer);process.exit(0);})().catch(function(e){_killChildren();console.error("GOAUDIT_PROBE_IMPORT_FAILED:probe:"+((e&&e.code)||"ERR"));process.exit(1)});`,
 		timeoutSec*1000, string(pkgJSON), timeoutSec*1000)
@@ -75,6 +88,6 @@ func GenerateNodeProbeScript(packages []string, timeoutSec int) string {
 	b.WriteString("\ncat << 'GOAUDIT_PROBE_EOF' > /workspace/.goaudit_probe.cjs\n")
 	b.WriteString(js + "\n")
 	b.WriteString("GOAUDIT_PROBE_EOF\n")
-	b.WriteString(fmt.Sprintf("NODE_PATH=/workspace/node_modules timeout %d node /workspace/.goaudit_probe.cjs || true\n", timeoutSec+2))
+	fmt.Fprintf(&b, "NODE_PATH=/workspace/node_modules timeout %d node /workspace/.goaudit_probe.cjs || true\n", timeoutSec+2)
 	return b.String()
 }

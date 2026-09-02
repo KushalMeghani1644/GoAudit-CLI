@@ -102,6 +102,36 @@ func TestProbeScriptFallbackResolvesPackageRoot(t *testing.T) {
 	}
 }
 
+// Regression: index.js/index.mjs fallbacks are only valid when the workspace
+// manifest declares no main; a present-but-broken main must fail the load
+// instead of being masked by a fallback entry.
+func TestProbeScriptUsesIndexFallbackOnlyWithoutMain(t *testing.T) {
+	script := GenerateNodeProbeScript([]string{"lodash"}, 15)
+	if !strings.Contains(script, `var cands=[];if(typeof p.main==="string"){cands.push(p.main);}else{cands.push("index.js","index.mjs");}`) {
+		t.Fatal("expected index.js/index.mjs fallback candidates only when p.main is absent")
+	}
+}
+
+// Regression: bins must be probed from the resolved installed package root
+// independent of import success, never by passing the raw specifier to
+// _probeBins.
+func TestProbeScriptProbesBinsFromResolvedRoot(t *testing.T) {
+	script := GenerateNodeProbeScript([]string{"lodash"}, 15)
+	okCall := `_root=_resolvePkgRoot(_pkgs[i]);if(_root){try{await _probeBins(_root,_pkgs[i]);}catch(e3){}}`
+	if !strings.Contains(script, okCall) {
+		t.Fatal("expected successful imports to probe bins from the resolved root")
+	}
+	if strings.Count(script, okCall) < 2 {
+		t.Fatal("expected failed imports to probe bins from the resolved root too")
+	}
+	if strings.Contains(script, `await _probeBins(_pkgs[i])`) {
+		t.Fatal("expected _probeBins to never receive a package specifier instead of a root")
+	}
+	if !strings.Contains(script, `var direct=_path.join("/workspace/node_modules",pkg);`) {
+		t.Fatal("expected root resolution to check the installed package path first")
+	}
+}
+
 func TestProbeScriptTracksAndKillsChildrenOnTimeout(t *testing.T) {
 	script := GenerateNodeProbeScript([]string{"lodash"}, 15)
 	if !strings.Contains(script, `var _children=[];function _killChildren(){`) {
@@ -193,6 +223,9 @@ func runProbeScript(t *testing.T, script string, timeoutSec int, mutate func(str
 func writeWorkspaceFile(t *testing.T, dir, rel, content string) {
 	t.Helper()
 	path := filepath.Join(dir, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(rel), err)
+	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", rel, err)
 	}
@@ -225,6 +258,57 @@ func TestProbeWorkspaceESMTopLevelAwaitProbesBins(t *testing.T) {
 	}
 	if strings.Contains(out, "GOAUDIT_PROBE_IMPORT_FAILED:tla-pkg") {
 		t.Fatalf("expected workspace load via dynamic import() to succeed, output:\n%s", out)
+	}
+}
+
+// Regression: a package installed under node_modules with a declared bin but
+// no importable entry point must still get its bins probed from the resolved
+// package root, even though both import paths fail.
+func TestProbeInstalledPackageWithBinAndNoImportableEntry(t *testing.T) {
+	dir := t.TempDir()
+	pkg := map[string]any{
+		"name":    "broken-pkg",
+		"version": "1.0.0",
+		"bin":     map[string]string{"broken": "./bin.js"},
+	}
+	pkgJSON, _ := json.Marshal(pkg)
+	writeWorkspaceFile(t, dir, filepath.Join("node_modules", "broken-pkg", "package.json"), string(pkgJSON)+"\n")
+	writeWorkspaceFile(t, dir, filepath.Join("node_modules", "broken-pkg", "bin.js"), "#!/usr/bin/env node\nprocess.exit(0);\n")
+	if err := os.Chmod(filepath.Join(dir, "node_modules", "broken-pkg", "bin.js"), 0o755); err != nil {
+		t.Fatalf("chmod bin: %v", err)
+	}
+
+	out := runProbeScript(t, GenerateNodeProbeScript([]string{"broken-pkg"}, 15), 15, nil, dir)
+
+	if !strings.Contains(out, "GOAUDIT_PROBE_BIN_OK:broken-pkg:./bin.js") {
+		t.Fatalf("expected declared bin to be probed despite failed imports, output:\n%s", out)
+	}
+	if !strings.Contains(out, "GOAUDIT_PROBE_IMPORT_FAILED:broken-pkg") {
+		t.Fatalf("expected an honest import failure alongside the bin probe, output:\n%s", out)
+	}
+}
+
+// Regression: a workspace with a broken main must not be masked by the
+// index.js/index.mjs fallback entries; the load fails honestly.
+func TestProbeWorkspaceBrokenMainDoesNotFallBackToIndex(t *testing.T) {
+	dir := t.TempDir()
+	pkg := map[string]any{
+		"name":    "ws-pkg",
+		"version": "1.0.0",
+		"main":    "broken.js",
+	}
+	pkgJSON, _ := json.Marshal(pkg)
+	writeWorkspaceFile(t, dir, "package.json", string(pkgJSON)+"\n")
+	writeWorkspaceFile(t, dir, "broken.js", "throw new Error(\"boom\");\n")
+	writeWorkspaceFile(t, dir, "index.js", "module.exports = 42;\n")
+
+	out := runProbeScript(t, GenerateNodeProbeScript([]string{"ws-pkg"}, 15), 15, nil, dir)
+
+	if !strings.Contains(out, "GOAUDIT_PROBE_IMPORT_FAILED:ws-pkg") {
+		t.Fatalf("expected broken main to fail the workspace load, output:\n%s", out)
+	}
+	if strings.Contains(out, "GOAUDIT_PROBE_IMPORT_OK:ws-pkg") {
+		t.Fatalf("expected index.js fallback to be skipped when main is present, output:\n%s", out)
 	}
 }
 
