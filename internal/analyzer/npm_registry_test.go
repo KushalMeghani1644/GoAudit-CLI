@@ -3,6 +3,8 @@ package analyzer
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -44,21 +46,90 @@ func TestAnalyzeRegistryPackagesUsesRegistry(t *testing.T) {
 	}
 }
 
-func TestCLIInstallStillCapsAtThree(t *testing.T) {
-	findings := analyzeRegistryBackedSpecs([]string{"a", "b", "c", "d"}, "npm", cliRegistrySpecCap)
-	if len(findings) > 0 {
-		// Without server, specs return INCONCLUSIVE or empty; ensure we only processed 3 by not panicking.
+func TestAnalyzeRegistryPackagesResolvesNPMAliasTarget(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/actual-package" {
+			t.Errorf("metadata requested for %q, want target package /actual-package", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"dist-tags": {"latest": "1.2.3"},
+			"versions": {
+				"1.2.3": {"scripts": {"postinstall": "node setup.js"}}
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	old := npmRegistryBaseURL
+	npmRegistryBaseURL = srv.URL
+	defer func() { npmRegistryBaseURL = old }()
+
+	findings := AnalyzeRegistryPackages([]string{"alias@npm:actual-package@1.2.3"}, "npm")
+	if findByReasonCode(findings, "NPM_LIFECYCLE_SCRIPT_METADATA") == nil {
+		t.Fatalf("expected lifecycle finding for alias target, got %#v", findings)
 	}
-	specs := extractInstallSpecs("npm install a b c d", "npm", []string{"install", "i"})
-	if len(specs) != 4 {
-		t.Fatalf("expected 4 specs extracted")
+}
+
+func TestAnalyzeRegistryPackagesResolvesVPrefixedVersion(t *testing.T) {
+	// v1.2.3 (requested) and latest (2.0.0) have different scripts: the
+	// analyzer must inspect the requested version, not dist-tags.latest.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/pkg" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"dist-tags": {"latest": "2.0.0"},
+			"time": {"created": "2010-01-01T00:00:00.000Z"},
+			"versions": {
+				"1.2.3": {"scripts": {"postinstall": "node setup.js"}},
+				"2.0.0": {"scripts": {"postinstall": "echo ok"}}
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	old := npmRegistryBaseURL
+	npmRegistryBaseURL = srv.URL
+	defer func() { npmRegistryBaseURL = old }()
+
+	findings := AnalyzeRegistryPackages([]string{"pkg@v1.2.3"}, "npm")
+	lifecycle := findByReasonCode(findings, "NPM_LIFECYCLE_SCRIPT_METADATA")
+	if lifecycle == nil {
+		t.Fatalf("expected lifecycle finding for requested version, got %#v", findings)
 	}
-	capped := specs
-	if len(capped) > cliRegistrySpecCap {
-		capped = capped[:cliRegistrySpecCap]
+	if lifecycle.Path != "pkg@1.2.3" {
+		t.Fatalf("expected analysis of pkg@1.2.3, got path %q", lifecycle.Path)
 	}
-	if len(capped) != 3 {
-		t.Fatalf("expected cap of 3, got %d", len(capped))
+	if findByReasonCode(findings, "NPM_VERSION_RESOLUTION_APPROXIMATE") != nil {
+		t.Fatalf("v-prefixed concrete version should not be approximate: %#v", findings)
+	}
+}
+
+func TestCLIInstallCoverageLimitFinding(t *testing.T) {
+	// Build more specs than the cap; local paths avoid network.
+	var specs []string
+	for i := 0; i < cliRegistrySpecCap+3; i++ {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"p","version":"1.0.0"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		specs = append(specs, dir)
+	}
+	findings := analyzeRegistryBackedSpecs(specs, "npm", cliRegistrySpecCap)
+	found := false
+	for _, f := range findings {
+		if f.ReasonCode == "STATIC_COVERAGE_LIMIT" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected STATIC_COVERAGE_LIMIT when exceeding cap %d, got %#v", cliRegistrySpecCap, findings)
 	}
 }
 
