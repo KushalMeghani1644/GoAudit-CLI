@@ -1,2 +1,6 @@
 test-malicious-pkg/
 AGENTS.md
+
+# Build artifacts
+/goaudit
+/cmd/goaudit/goaudit
