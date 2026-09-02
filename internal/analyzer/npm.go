@@ -487,11 +487,26 @@ func isShellSeparator(p string) bool {
 	return p == "&&" || p == ";" || p == "|" || p == "||"
 }
 
+// lineContinuationLen returns the length of a newline sequence at the start
+// of s (1 for \n, 2 for \r\n), or 0 when s does not start with one. An
+// escaped newline is a shell line continuation and is dropped entirely.
+func lineContinuationLen(s string) int {
+	switch {
+	case strings.HasPrefix(s, "\r\n"):
+		return 2
+	case strings.HasPrefix(s, "\n"):
+		return 1
+	default:
+		return 0
+	}
+}
+
 // unquotedFields tokenizes the command like a minimal shell lexer: unquoted
 // whitespace splits words, quotes group text and are stripped, a backslash
-// escapes the next character, and unquoted shell separators (&&, ||, |, ;)
-// become their own tokens even without surrounding spaces, so
-// `install "lodash"&&echo` yields ["install", "lodash", "&&", "echo"].
+// escapes the next character (or continues the line when followed by a
+// newline), and unquoted shell separators (&&, ||, |, ;) become their own
+// tokens even without surrounding spaces, so `install "lodash"&&echo`
+// yields ["install", "lodash", "&&", "echo"].
 // This is intentionally not a full shell parser.
 func unquotedFields(command string) []string {
 	var (
@@ -515,7 +530,11 @@ func unquotedFields(command string) []string {
 				quote = 0
 			case quote == '"' && c == '\\' && i+1 < len(command):
 				i++
-				cur.WriteByte(command[i])
+				if n := lineContinuationLen(command[i:]); n > 0 {
+					i += n - 1 // line continuation: drop \ and the newline
+				} else {
+					cur.WriteByte(command[i])
+				}
 			default:
 				cur.WriteByte(c)
 			}
@@ -527,8 +546,12 @@ func unquotedFields(command string) []string {
 			inWord = true // empty quotes still form a token
 		case c == '\\' && i+1 < len(command):
 			i++
-			cur.WriteByte(command[i])
-			inWord = true
+			if n := lineContinuationLen(command[i:]); n > 0 {
+				i += n - 1 // line continuation: drop \ and the newline
+			} else {
+				cur.WriteByte(command[i])
+				inWord = true
+			}
 		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f':
 			flush()
 		case c == ';':

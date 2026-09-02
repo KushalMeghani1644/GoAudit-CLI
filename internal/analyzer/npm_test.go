@@ -137,6 +137,24 @@ func TestExtractInstallSpecsStopsAtShellSeparators(t *testing.T) {
 	}
 }
 
+func TestExtractInstallSpecsLineContinuations(t *testing.T) {
+	cases := []string{
+		"npm install \\\nlodash",
+		"npm install \\\r\nlodash",
+		"npm \\\n install lodash",
+		"npm install \"lo\\\ndash\"",
+	}
+	for _, cmd := range cases {
+		specs, partial := extractInstallSpecsFull(cmd, "npm", []string{"install", "i"})
+		if len(specs) != 1 || specs[0] != "lodash" {
+			t.Fatalf("cmd %q: expected [lodash], got %#v", cmd, specs)
+		}
+		if partial {
+			t.Fatalf("cmd %q: did not expect partial parse flag", cmd)
+		}
+	}
+}
+
 func TestExtractInstallSpecsSudoUserFlag(t *testing.T) {
 	cases := []string{
 		"sudo -u user npm install lodash",
