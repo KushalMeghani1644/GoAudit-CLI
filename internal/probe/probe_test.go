@@ -94,8 +94,11 @@ func TestProbeScriptFallbackResolvesPackageRoot(t *testing.T) {
 	if !strings.Contains(script, `_path.dirname(require.resolve(pkg+"/package.json"))`) {
 		t.Fatal("expected primary root resolution via pkg/package.json")
 	}
-	if !strings.Contains(script, `if(_fs.existsSync(_path.join(d,"package.json")))return d;`) {
-		t.Fatal("expected fallback to walk up to directory containing package.json")
+	if !strings.Contains(script, `if(pj&&pj.name===pkg)return d;`) {
+		t.Fatal("expected upward walk to prefer the manifest whose name matches the package")
+	}
+	if !strings.Contains(script, `if(first===null)first=d;`) {
+		t.Fatal("expected nearest manifest kept as fallback when no name matches")
 	}
 }
 
