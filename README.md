@@ -68,7 +68,6 @@ goaudit scan-project ~/app --include-transitive
 goaudit scan-project ~/app --probe-all
 goaudit scan-project ~/app --skip-probe
 goaudit scan-project ~/app --mount-project
-goaudit scan-project ~/app --warm-cache
 ```
 
 Upgrade modes:
@@ -85,7 +84,7 @@ Project-only flags:
 |------|---------|
 | `--upgrade-mode` | `refresh-lock`, `ncu`, or `update` |
 | `--manager` | Force `npm`, `pnpm`, or `bun` |
-| `--include-transitive` | Also registry-check packages listed in `package-lock.json` |
+| `--include-transitive` | Also registry-check packages listed in the manager's lockfile (`package-lock.json`, `pnpm-lock.yaml`, or `bun.lock`) |
 | `--probe-all` | Probe all direct dependencies at runtime, not only suspicious ones |
 | `--mount-project` | Stage the full project tree (secret paths redacted) instead of manifests/lockfiles only |
 
