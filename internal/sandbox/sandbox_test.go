@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,15 +46,18 @@ func TestHoneypotCredentialsAreParseableAndUnmarked(t *testing.T) {
 		t.Skip("ssh-keygen is required to validate the OpenSSH honeypot key")
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	home := t.TempDir()
-	cmd := exec.Command("bash", "-c", honeypotScript())
+	cmd := exec.CommandContext(ctx, "bash", "-c", honeypotScript())
 	cmd.Env = append(os.Environ(), "SANDBOX_HOME="+home, "SANDBOX_USER=root")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("create honeypot files: %v\n%s", err, output)
 	}
 
 	keyPath := filepath.Join(home, ".ssh", "id_rsa")
-	if output, err := exec.Command("ssh-keygen", "-y", "-f", keyPath).CombinedOutput(); err != nil {
+	if output, err := exec.CommandContext(ctx, "ssh-keygen", "-y", "-f", keyPath).CombinedOutput(); err != nil {
 		t.Fatalf("honeypot SSH key does not parse: %v\n%s", err, output)
 	}
 
@@ -67,6 +71,36 @@ func TestHoneypotCredentialsAreParseableAndUnmarked(t *testing.T) {
 	}
 	if !regexp.MustCompile(`(?m)^aws_secret_access_key = [A-Za-z0-9/+=]{40}$`).MatchString(aws) {
 		t.Fatalf("AWS secret key does not have a valid-looking format:\n%s", aws)
+	}
+
+	kubeBytes, err := os.ReadFile(filepath.Join(home, ".kube", "config"))
+	if err != nil {
+		t.Fatalf("read Kubernetes config: %v", err)
+	}
+	tokenMatch := regexp.MustCompile(`(?m)^\s*token: (\S+)$`).FindSubmatch(kubeBytes)
+	if tokenMatch == nil {
+		t.Fatal("Kubernetes config does not contain a token")
+	}
+	tokenParts := strings.Split(string(tokenMatch[1]), ".")
+	if len(tokenParts) != 3 {
+		t.Fatalf("Kubernetes token has %d segments, want 3", len(tokenParts))
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(tokenParts[2])
+	if err != nil {
+		t.Fatalf("Kubernetes token signature is not valid base64url: %v", err)
+	}
+	if len(signature) != 256 {
+		t.Fatalf("Kubernetes token signature is %d bytes, want 256 for RS256", len(signature))
+	}
+	printableSignature := true
+	for _, b := range signature {
+		if b < 0x20 || b > 0x7e {
+			printableSignature = false
+			break
+		}
+	}
+	if printableSignature {
+		t.Fatalf("Kubernetes token signature contains readable placeholder content: %q", signature)
 	}
 
 	credentialPaths := []string{
