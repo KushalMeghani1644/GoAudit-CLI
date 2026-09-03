@@ -710,13 +710,17 @@ func honeypotScript() string {
 cat > "${SANDBOX_HOME}/.ssh/id_rsa" << 'HONEYPOT_SSH'
 -----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
-QyNTUxOQAAACBhbGljZUBleGFtcGxlLmNvbSBnb2F1ZGl0LWhvbmV5cG90AAAAJGF1ZGl0
+QyNTUxOQAAACBqkSeSrbynBuV6IWHjU/bQh8hku4bwObCTmMBD7dQmbQAAAKBAx/jaQMf4
+2gAAAAtzc2gtZWQyNTUxOQAAACBqkSeSrbynBuV6IWHjU/bQh8hku4bwObCTmMBD7dQmbQ
+AAAEDR9kJynnF3Y5r1Bcpmij8xaHduUL0ieGLJQflZYs68/2qRJ5KtvKcG5XohYeNT9tCH
+yGS7hvA5sJOYwEPt1CZtAAAAFmRlcGxveUBidWlsZC13b3JrZXItMDcBAgMEBQYH
+-----END OPENSSH PRIVATE KEY-----
 HONEYPOT_SSH
 chmod 600 "${SANDBOX_HOME}/.ssh/id_rsa"
 cat > "${SANDBOX_HOME}/.aws/credentials" << 'HONEYPOT_AWS'
 [default]
-aws_access_key_id = AKIAIOSFODNN7EXAMPLE
-aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+aws_access_key_id = AKIAY7M4N2Q8V6C3Z5PX
+aws_secret_access_key = F8vK3qN7xR2mP9sT4wY6aC1dE5gH8jL0uB3iO7zQ
 region = us-east-1
 HONEYPOT_AWS
 cat > "${SANDBOX_HOME}/.kube/config" << 'HONEYPOT_KUBE'
@@ -724,18 +728,18 @@ apiVersion: v1
 kind: Config
 clusters:
 - cluster:
-    server: https://k8s.example.com:6443
+    server: https://k8s.prod.corp:6443
   name: production
 users:
 - name: admin
   user:
-    token: eyJhbGciOiJSUzI1NiJ9.goaudit-honeypot
+    token: eyJhbGciOiJSUzI1NiIsImtpZCI6Ims4cy1wcm9kLTA3In0.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwic3ViIjoic3lzdGVtOnNlcnZpY2VhY2NvdW50OnByb2Q6ZGVwbG95ZXIifQ.dGhyb3dhd2F5LXNpZ25hdHVyZS1ieXRlcw
 HONEYPOT_KUBE
-echo 'DATABASE_URL=postgres://admin:s3cret@db.example.com:5432/prod' > "${SANDBOX_HOME}/.env"
-echo 'API_SECRET=sk_live_goaudit_honeypot_4f8a2b1c9d3e' >> "${SANDBOX_HOME}/.env"
-echo 'https://token:ghp_goaudit_honeypot@github.com' > "${SANDBOX_HOME}/.git-credentials"
+echo 'DATABASE_URL=postgres://admin:s3cret@db.prod.corp:5432/prod' > "${SANDBOX_HOME}/.env"
+echo 'API_SECRET=api_live_Q7m2X9v4K6p8N3c5R1t0Y2w4' >> "${SANDBOX_HOME}/.env"
+echo 'https://token:ghp_R7mN4kQ2vX9cL6sD3fH8jP5wT1yB0aE7uI2o@github.com' > "${SANDBOX_HOME}/.git-credentials"
 chmod 600 "${SANDBOX_HOME}/.git-credentials" 2>/dev/null || true
-echo '//registry.npmjs.org/:_authToken=npm_goaudit_honeypot_token' > "${SANDBOX_HOME}/.npmrc"
+echo '//registry.npmjs.org/:_authToken=npm_8Kz3pQ7vN2xM9cR4tY6wF1hJ5sL0dB8gQ4xV' > "${SANDBOX_HOME}/.npmrc"
 if [ -n "$SANDBOX_USER" ] && [ "$SANDBOX_USER" != "root" ]; then
   chown -R 1000:1000 "${SANDBOX_HOME}" 2>/dev/null || true
 fi
@@ -748,7 +752,7 @@ func workspaceHoneypotScript() string {
 
 func workspaceDotEnvScript() string {
 	return `mkdir -p /workspace 2>/dev/null || true
-echo 'DATABASE_URL=postgres://admin:s3cret@db.example.com:5432/prod' > /workspace/.env
-echo 'API_SECRET=sk_live_goaudit_honeypot_workspace' >> /workspace/.env
+echo 'DATABASE_URL=postgres://admin:s3cret@db.prod.corp:5432/prod' > /workspace/.env
+echo 'API_SECRET=api_live_M8p4V2x7R9k1C6n3T5w0H2q8' >> /workspace/.env
 `
 }

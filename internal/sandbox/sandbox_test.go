@@ -2,7 +2,10 @@ package sandbox
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -14,8 +17,8 @@ func TestHoneypotScript(t *testing.T) {
 	if !strings.Contains(script, "${SANDBOX_HOME}/.aws/credentials") {
 		t.Error("honeypot missing aws credentials")
 	}
-	if !strings.Contains(script, "AKIAIOSFODNN7EXAMPLE") {
-		t.Error("honeypot missing realistic AWS access key")
+	if strings.Contains(script, "AKIAIOSFODNN7EXAMPLE") || strings.Contains(script, "EXAMPLEKEY") {
+		t.Error("honeypot must not use AWS documentation credentials")
 	}
 	if !strings.Contains(script, "${SANDBOX_HOME}/.ssh/id_rsa") {
 		t.Error("honeypot missing ssh key")
@@ -37,10 +40,64 @@ func TestHoneypotScript(t *testing.T) {
 	}
 }
 
+func TestHoneypotCredentialsAreParseableAndUnmarked(t *testing.T) {
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		t.Skip("ssh-keygen is required to validate the OpenSSH honeypot key")
+	}
+
+	home := t.TempDir()
+	cmd := exec.Command("bash", "-c", honeypotScript())
+	cmd.Env = append(os.Environ(), "SANDBOX_HOME="+home, "SANDBOX_USER=root")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create honeypot files: %v\n%s", err, output)
+	}
+
+	keyPath := filepath.Join(home, ".ssh", "id_rsa")
+	if output, err := exec.Command("ssh-keygen", "-y", "-f", keyPath).CombinedOutput(); err != nil {
+		t.Fatalf("honeypot SSH key does not parse: %v\n%s", err, output)
+	}
+
+	awsBytes, err := os.ReadFile(filepath.Join(home, ".aws", "credentials"))
+	if err != nil {
+		t.Fatalf("read AWS credentials: %v", err)
+	}
+	aws := string(awsBytes)
+	if !regexp.MustCompile(`(?m)^aws_access_key_id = AKIA[A-Z0-9]{16}$`).MatchString(aws) {
+		t.Fatalf("AWS access key does not have a valid-looking format:\n%s", aws)
+	}
+	if !regexp.MustCompile(`(?m)^aws_secret_access_key = [A-Za-z0-9/+=]{40}$`).MatchString(aws) {
+		t.Fatalf("AWS secret key does not have a valid-looking format:\n%s", aws)
+	}
+
+	credentialPaths := []string{
+		keyPath,
+		filepath.Join(home, ".aws", "credentials"),
+		filepath.Join(home, ".kube", "config"),
+		filepath.Join(home, ".env"),
+		filepath.Join(home, ".git-credentials"),
+		filepath.Join(home, ".npmrc"),
+	}
+	for _, path := range credentialPaths {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		lower := strings.ToLower(string(content))
+		for _, marker := range []string{"goaudit", "honeypot", "examplekey", "akiaiosfodnn7example"} {
+			if strings.Contains(lower, marker) {
+				t.Errorf("%s contains self-identifying marker %q", path, marker)
+			}
+		}
+	}
+}
+
 func TestWorkspaceHoneypotScript(t *testing.T) {
 	script := workspaceDotEnvScript()
 	if !strings.Contains(script, "/workspace/.env") {
 		t.Error("workspace honeypot missing /workspace/.env")
+	}
+	if strings.Contains(strings.ToLower(script), "goaudit") || strings.Contains(strings.ToLower(script), "honeypot") {
+		t.Error("workspace honeypot values must not identify the scanner")
 	}
 }
 
