@@ -621,6 +621,7 @@ func runSandboxAndParse(
 	dynamicFindings, traceHealth, err := parser.ParseStreamWithHealth(logStream, reporter, parser.ParseOptions{
 		KnownRegistryIPs: registryIPs,
 		ProbeExpected:    len(opts.probePackages) > 0 && !opts.skipProbe,
+		RunAsRoot:        opts.runAsRoot,
 	})
 	if err != nil {
 		return nil, "", traceHealth, err
@@ -656,6 +657,7 @@ func runCachedSandboxAndParse(
 	dynamicFindings, traceHealth, err := parser.ParseStreamWithHealth(logStream, reporter, parser.ParseOptions{
 		KnownRegistryIPs: registryIPs,
 		ProbeExpected:    len(opts.probePackages) > 0 && !opts.skipProbe,
+		RunAsRoot:        opts.runAsRoot,
 	})
 	if err != nil {
 		return nil, "", traceHealth, err

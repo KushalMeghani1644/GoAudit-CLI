@@ -99,6 +99,28 @@ func TestEvaluatePrivilegeEscalationAttemptIsSuspicious(t *testing.T) {
 	}
 }
 
+func TestPrivilegedKernelOperationVerdicts(t *testing.T) {
+	t.Run("failed attempt is suspicious", func(t *testing.T) {
+		verdict, _ := Evaluate([]Finding{{
+			Severity:   SeverityWarning,
+			ReasonCode: "PRIVILEGED_KERNEL_OPERATION_ATTEMPT",
+		}}, defaultOpts)
+		if verdict != VerdictSuspicious {
+			t.Fatalf("expected suspicious verdict for failed kernel operation, got %s", verdict)
+		}
+	})
+
+	t.Run("successful operation is malicious", func(t *testing.T) {
+		verdict, _ := Evaluate([]Finding{{
+			Severity:   SeverityCritical,
+			ReasonCode: "PRIVILEGED_KERNEL_OPERATION",
+		}}, defaultOpts)
+		if verdict != VerdictMalicious {
+			t.Fatalf("expected malicious verdict for successful kernel operation, got %s", verdict)
+		}
+	})
+}
+
 func TestEvaluateFailedAccountFileAccessNotMalicious(t *testing.T) {
 	// Denied shadow access alone must not force MALICIOUS (scanner false positive path).
 	verdict, _ := Evaluate([]Finding{

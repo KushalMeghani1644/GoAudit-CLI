@@ -264,8 +264,8 @@ func TestPrivilegeEscalationNoiseNotFlagged(t *testing.T) {
 		{name: "setgid non-root", input: "GOAUDIT_RUNTIME_META:phase=target\nsetgid(1000) = 0"},
 		{name: "setreuid user switch", input: "GOAUDIT_RUNTIME_META:phase=target\nsetreuid(0, -1) = 0"},
 		{name: "setregid user switch", input: "GOAUDIT_RUNTIME_META:phase=target\nsetregid(0, -1) = 0"},
-		{name: "setresuid real root only", input: "GOAUDIT_RUNTIME_META:phase=target\nsetresuid(0, -1, -1) = 0"},
-		{name: "setresgid real root only", input: "GOAUDIT_RUNTIME_META:phase=target\nsetresgid(0, -1, -1) = 0"},
+		{name: "setresuid unchanged IDs", input: "GOAUDIT_RUNTIME_META:phase=target\nsetresuid(-1, -1, -1) = 0"},
+		{name: "setresgid unchanged IDs", input: "GOAUDIT_RUNTIME_META:phase=target\nsetresgid(-1, -1, -1) = 0"},
 		{name: "setgroups no root group", input: "GOAUDIT_RUNTIME_META:phase=target\nsetgroups(1, [1000]) = 0"},
 		{name: "success before target phase", input: "setuid(0) = 0"},
 		{name: "failed attempt before target phase", input: "setuid(0) = -1 EPERM (Operation not permitted)"},
@@ -311,6 +311,58 @@ func TestPrivilegeEscalationAttemptsDeduplicateBySyscallAndArgs(t *testing.T) {
 	findings := parse(t, input)
 	if got := countByReason(findings, "PRIVILEGE_ESCALATION_ATTEMPT"); got != 2 {
 		t.Fatalf("expected separate setuid/setgid privilege attempts, got %d", got)
+	}
+}
+
+func TestSetresIDDetectsRealRootArgument(t *testing.T) {
+	for _, line := range []string{
+		"setresuid(0, -1, -1) = 0",
+		"setresgid(0, -1, -1) = -1 EPERM (Operation not permitted)",
+	} {
+		t.Run(line, func(t *testing.T) {
+			findings := parse(t, "GOAUDIT_RUNTIME_META:phase=target\n"+line)
+			if findByReason(findings, "PRIVILEGE_ESCALATION") == nil &&
+				findByReason(findings, "PRIVILEGE_ESCALATION_ATTEMPT") == nil {
+				t.Fatalf("expected real-ID root transition finding for %s", line)
+			}
+		})
+	}
+}
+
+func TestSetfsIDIsAlwaysAnAttempt(t *testing.T) {
+	for _, line := range []string{
+		"setfsuid(0) = 1000",
+		"setfsgid(0) = 1000",
+	} {
+		t.Run(line, func(t *testing.T) {
+			findings := parse(t, "GOAUDIT_RUNTIME_META:phase=target\n"+line)
+			f := findByReason(findings, "PRIVILEGE_ESCALATION_ATTEMPT")
+			if f == nil {
+				t.Fatalf("expected filesystem-ID transition attempt for %s", line)
+			}
+			if f.Severity != report.SeverityWarning {
+				t.Fatalf("expected warning because setfsid returns the previous ID, got %s", f.Severity)
+			}
+		})
+	}
+}
+
+func TestRootScanAddsPrivilegeEvidenceCaveat(t *testing.T) {
+	rep := report.NewReporter(true, false)
+	findings, err := ParseStream(
+		strings.NewReader("GOAUDIT_RUNTIME_META:phase=target\nsetuid(0) = 0"),
+		rep,
+		ParseOptions{RunAsRoot: true},
+	)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	f := findByReason(findings, "PRIVILEGE_ESCALATION")
+	if f == nil {
+		t.Fatal("expected privilege finding")
+	}
+	if !strings.Contains(f.Evidence, "Root scan:") {
+		t.Fatalf("expected root-scan caveat in evidence, got %q", f.Evidence)
 	}
 }
 
@@ -372,6 +424,7 @@ func TestDetectsSUIDSGIDChmodSyscalls(t *testing.T) {
 		`chmod("/tmp/goaudit-suid-test", 04755) = 0`,
 		`chmod("/tmp/goaudit-sgid-test", 02755) = -1 EPERM (Operation not permitted)`,
 		`fchmodat(AT_FDCWD, "/tmp/goaudit-suid-test", 04755, 0) = 0`,
+		`fchmod(7, 04755) = 0`,
 	}
 	for _, line := range tests {
 		t.Run(line, func(t *testing.T) {
@@ -383,7 +436,44 @@ func TestDetectsSUIDSGIDChmodSyscalls(t *testing.T) {
 			if f.Type != "privilege" {
 				t.Fatalf("expected privilege type, got %s", f.Type)
 			}
+			if strings.HasPrefix(line, "fchmod(") && f.Path != "fd 7 mode 4755" {
+				t.Fatalf("expected descriptor to be labeled as fd, got %q", f.Path)
+			}
 		})
+	}
+}
+
+func TestDetectsPrivilegedKernelOperations(t *testing.T) {
+	tests := []struct {
+		name     string
+		line     string
+		reason   string
+		severity report.Severity
+	}{
+		{name: "unshare failed", line: "unshare(CLONE_NEWUSER) = -1 EPERM (Operation not permitted)", reason: "PRIVILEGED_KERNEL_OPERATION_ATTEMPT", severity: report.SeverityWarning},
+		{name: "setns success", line: "setns(4, CLONE_NEWNS) = 0", reason: "PRIVILEGED_KERNEL_OPERATION", severity: report.SeverityCritical},
+		{name: "clone user namespace", line: "clone(child_stack=NULL, flags=CLONE_NEWUSER|SIGCHLD) = 42", reason: "PRIVILEGED_KERNEL_OPERATION", severity: report.SeverityCritical},
+		{name: "chroot failed", line: `chroot("/tmp/root") = -1 EPERM (Operation not permitted)`, reason: "PRIVILEGED_KERNEL_OPERATION_ATTEMPT", severity: report.SeverityWarning},
+		{name: "keyctl success", line: `keyctl(KEYCTL_JOIN_SESSION_KEYRING, "x") = 1`, reason: "PRIVILEGED_KERNEL_OPERATION", severity: report.SeverityCritical},
+		{name: "bpf failed", line: "bpf(BPF_PROG_LOAD, {}) = -1 EPERM (Operation not permitted)", reason: "PRIVILEGED_KERNEL_OPERATION_ATTEMPT", severity: report.SeverityWarning},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := findByReason(parse(t, "GOAUDIT_RUNTIME_META:phase=target\n"+tt.line), tt.reason)
+			if f == nil {
+				t.Fatalf("expected %s for %s", tt.reason, tt.line)
+			}
+			if f.Severity != tt.severity {
+				t.Fatalf("expected %s, got %s", tt.severity, f.Severity)
+			}
+		})
+	}
+}
+
+func TestIgnoresOrdinaryClone(t *testing.T) {
+	findings := parse(t, "GOAUDIT_RUNTIME_META:phase=target\nclone(child_stack=NULL, flags=SIGCHLD) = 42")
+	if findByReason(findings, "PRIVILEGED_KERNEL_OPERATION") != nil {
+		t.Fatal("ordinary process creation must not be treated as a privileged kernel operation")
 	}
 }
 
