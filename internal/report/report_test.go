@@ -121,6 +121,17 @@ func TestPrivilegedKernelOperationVerdicts(t *testing.T) {
 	})
 }
 
+func TestFailedPrivilegeOperationsShareSuspiciousCeiling(t *testing.T) {
+	verdict, _ := Evaluate([]Finding{
+		{Severity: SeverityWarning, ReasonCode: "PRIVILEGE_ESCALATION_ATTEMPT"},
+		{Severity: SeverityWarning, ReasonCode: "MOUNT_OPERATION_ATTEMPT"},
+		{Severity: SeverityWarning, ReasonCode: "PRIVILEGED_KERNEL_OPERATION_ATTEMPT"},
+	}, defaultOpts)
+	if verdict != VerdictSuspicious {
+		t.Fatalf("expected failed privilege operations to remain suspicious, got %s", verdict)
+	}
+}
+
 func TestEvaluateFailedAccountFileAccessNotMalicious(t *testing.T) {
 	// Denied shadow access alone must not force MALICIOUS (scanner false positive path).
 	verdict, _ := Evaluate([]Finding{

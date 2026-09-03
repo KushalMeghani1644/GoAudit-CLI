@@ -13,7 +13,7 @@ run_fixture() {
 
   output=$(mktemp)
   trap 'rm -f "$output"' RETURN
-  "$CLI" scan "npm install ./$FIXTURES/$fixture" \
+  "$CLI" scan "env NPM_CONFIG_USERCONFIG=/dev/null npm install ./$FIXTURES/$fixture" \
     --ci \
     --skip-probe \
     --no-cache \
@@ -40,6 +40,6 @@ if expected_reason not in reasons:
 PY
 }
 
-run_fixture sudo-id SUSPICIOUS PRIVILEGE_ESCALATION_EXEC
+run_fixture sudo-id MALICIOUS PRIVILEGE_ESCALATION_EXEC
 run_fixture setuid-root SUSPICIOUS PRIVILEGE_ESCALATION_ATTEMPT
 run_fixture suid-copy MALICIOUS SUID_SGID_BIT_SET

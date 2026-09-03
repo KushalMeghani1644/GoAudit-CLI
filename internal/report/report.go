@@ -330,6 +330,16 @@ func reasonWeight(reasonCode string) int {
 		return 15
 	}
 }
+
+func isPrivilegeAttemptReason(reasonCode string) bool {
+	switch reasonCode {
+	case "PRIVILEGE_ESCALATION_ATTEMPT", "MOUNT_OPERATION_ATTEMPT", "PRIVILEGED_KERNEL_OPERATION_ATTEMPT":
+		return true
+	default:
+		return false
+	}
+}
+
 func isExpectedBehaviorReason(reasonCode string) bool {
 	switch reasonCode {
 	case "NPM_LIFECYCLE_SCRIPTS", "PNPM_LIFECYCLE_SCRIPTS", "BUN_INSTALL_SCRIPTS", "EXTERNAL_NETWORK_REGISTRY":
@@ -381,6 +391,18 @@ func Evaluate(findings []Finding, opts EvaluationOptions) (Verdict, int) {
 			continue
 		}
 		w := reasonWeight(f.ReasonCode)
+		if isPrivilegeAttemptReason(f.ReasonCode) {
+			// Failed privilege probes are one behavioral signal. Different syscall
+			// families from the same lifecycle command must not stack into a
+			// MALICIOUS verdict without a successful operation.
+			const group = "PRIVILEGE_OPERATION_ATTEMPT"
+			if seenReasonWeight[group] >= w {
+				continue
+			}
+			score += w - seenReasonWeight[group]
+			seenReasonWeight[group] = w
+			continue
+		}
 		if f.ReasonCode == "EXTERNAL_NETWORK" || f.ReasonCode == "EXTERNAL_NETWORK_REGISTRY" {
 			// Cap total network contribution at 10 to avoid flooding the score.
 			if seenReasonWeight[f.ReasonCode] >= 10 {

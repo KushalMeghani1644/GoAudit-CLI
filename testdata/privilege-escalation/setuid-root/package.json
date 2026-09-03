@@ -3,6 +3,6 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "postinstall": "node -e \"process.setuid(0)\""
+    "postinstall": "node -e \"try { process.setuid(0) } catch (_) {}\""
   }
 }
