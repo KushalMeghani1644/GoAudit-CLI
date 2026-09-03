@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,10 +43,6 @@ func TestHoneypotScript(t *testing.T) {
 }
 
 func TestHoneypotCredentialsAreParseableAndUnmarked(t *testing.T) {
-	if _, err := exec.LookPath("ssh-keygen"); err != nil {
-		t.Skip("ssh-keygen is required to validate the OpenSSH honeypot key")
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -57,9 +54,14 @@ func TestHoneypotCredentialsAreParseableAndUnmarked(t *testing.T) {
 	}
 
 	keyPath := filepath.Join(home, ".ssh", "id_rsa")
-	if output, err := exec.CommandContext(ctx, "ssh-keygen", "-y", "-f", keyPath).CombinedOutput(); err != nil {
-		t.Fatalf("honeypot SSH key does not parse: %v\n%s", err, output)
-	}
+	t.Run("SSH key parses", func(t *testing.T) {
+		if _, err := exec.LookPath("ssh-keygen"); err != nil {
+			t.Skip("ssh-keygen is required to validate the OpenSSH honeypot key")
+		}
+		if output, err := exec.CommandContext(ctx, "ssh-keygen", "-y", "-f", keyPath).CombinedOutput(); err != nil {
+			t.Fatalf("honeypot SSH key does not parse: %v\n%s", err, output)
+		}
+	})
 
 	awsBytes, err := os.ReadFile(filepath.Join(home, ".aws", "credentials"))
 	if err != nil {
@@ -85,6 +87,28 @@ func TestHoneypotCredentialsAreParseableAndUnmarked(t *testing.T) {
 	if len(tokenParts) != 3 {
 		t.Fatalf("Kubernetes token has %d segments, want 3", len(tokenParts))
 	}
+	decodeJSONSegment := func(name, segment string, target any) {
+		decoded, err := base64.RawURLEncoding.DecodeString(segment)
+		if err != nil {
+			t.Fatalf("Kubernetes token %s is not valid base64url: %v", name, err)
+		}
+		if err := json.Unmarshal(decoded, target); err != nil {
+			t.Fatalf("Kubernetes token %s is not valid JSON: %v", name, err)
+		}
+	}
+	var header struct {
+		Algorithm string `json:"alg"`
+	}
+	decodeJSONSegment("header", tokenParts[0], &header)
+	if header.Algorithm != "RS256" {
+		t.Fatalf("Kubernetes token algorithm is %q, want RS256", header.Algorithm)
+	}
+	var payload map[string]any
+	decodeJSONSegment("payload", tokenParts[1], &payload)
+	if payload == nil {
+		t.Fatal("Kubernetes token payload is not a JSON object")
+	}
+
 	signature, err := base64.RawURLEncoding.DecodeString(tokenParts[2])
 	if err != nil {
 		t.Fatalf("Kubernetes token signature is not valid base64url: %v", err)
