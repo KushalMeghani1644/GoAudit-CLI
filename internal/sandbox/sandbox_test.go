@@ -2,7 +2,12 @@ package sandbox
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -14,8 +19,8 @@ func TestHoneypotScript(t *testing.T) {
 	if !strings.Contains(script, "${SANDBOX_HOME}/.aws/credentials") {
 		t.Error("honeypot missing aws credentials")
 	}
-	if !strings.Contains(script, "AKIAIOSFODNN7EXAMPLE") {
-		t.Error("honeypot missing realistic AWS access key")
+	if strings.Contains(script, "AKIAIOSFODNN7EXAMPLE") || strings.Contains(script, "EXAMPLEKEY") {
+		t.Error("honeypot must not use AWS documentation credentials")
 	}
 	if !strings.Contains(script, "${SANDBOX_HOME}/.ssh/id_rsa") {
 		t.Error("honeypot missing ssh key")
@@ -37,10 +42,121 @@ func TestHoneypotScript(t *testing.T) {
 	}
 }
 
+func TestHoneypotCredentialsAreParseableAndUnmarked(t *testing.T) {
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		t.Fatal("ssh-keygen is required to validate the OpenSSH honeypot key")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	home := t.TempDir()
+	cmd := exec.CommandContext(ctx, "bash", "-c", honeypotScript())
+	cmd.Env = append(os.Environ(), "SANDBOX_HOME="+home, "SANDBOX_USER=root")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create honeypot files: %v\n%s", err, output)
+	}
+
+	keyPath := filepath.Join(home, ".ssh", "id_rsa")
+	t.Run("SSH key parses", func(t *testing.T) {
+		if output, err := exec.CommandContext(ctx, "ssh-keygen", "-y", "-f", keyPath).CombinedOutput(); err != nil {
+			t.Fatalf("honeypot SSH key does not parse: %v\n%s", err, output)
+		}
+	})
+
+	awsBytes, err := os.ReadFile(filepath.Join(home, ".aws", "credentials"))
+	if err != nil {
+		t.Fatalf("read AWS credentials: %v", err)
+	}
+	aws := string(awsBytes)
+	if !regexp.MustCompile(`(?m)^aws_access_key_id = AKIA[A-Z0-9]{16}$`).MatchString(aws) {
+		t.Fatalf("AWS access key does not have a valid-looking format:\n%s", aws)
+	}
+	if !regexp.MustCompile(`(?m)^aws_secret_access_key = [A-Za-z0-9/+=]{40}$`).MatchString(aws) {
+		t.Fatalf("AWS secret key does not have a valid-looking format:\n%s", aws)
+	}
+
+	kubeBytes, err := os.ReadFile(filepath.Join(home, ".kube", "config"))
+	if err != nil {
+		t.Fatalf("read Kubernetes config: %v", err)
+	}
+	tokenMatch := regexp.MustCompile(`(?m)^\s*token: (\S+)$`).FindSubmatch(kubeBytes)
+	if tokenMatch == nil {
+		t.Fatal("Kubernetes config does not contain a token")
+	}
+	tokenParts := strings.Split(string(tokenMatch[1]), ".")
+	if len(tokenParts) != 3 {
+		t.Fatalf("Kubernetes token has %d segments, want 3", len(tokenParts))
+	}
+	decodeJSONSegment := func(name, segment string, target any) {
+		decoded, err := base64.RawURLEncoding.DecodeString(segment)
+		if err != nil {
+			t.Fatalf("Kubernetes token %s is not valid base64url: %v", name, err)
+		}
+		if err := json.Unmarshal(decoded, target); err != nil {
+			t.Fatalf("Kubernetes token %s is not valid JSON: %v", name, err)
+		}
+	}
+	var header struct {
+		Algorithm string `json:"alg"`
+	}
+	decodeJSONSegment("header", tokenParts[0], &header)
+	if header.Algorithm != "RS256" {
+		t.Fatalf("Kubernetes token algorithm is %q, want RS256", header.Algorithm)
+	}
+	var payload map[string]any
+	decodeJSONSegment("payload", tokenParts[1], &payload)
+	if payload == nil {
+		t.Fatal("Kubernetes token payload is not a JSON object")
+	}
+
+	signature, err := base64.RawURLEncoding.DecodeString(tokenParts[2])
+	if err != nil {
+		t.Fatalf("Kubernetes token signature is not valid base64url: %v", err)
+	}
+	if len(signature) != 256 {
+		t.Fatalf("Kubernetes token signature is %d bytes, want 256 for RS256", len(signature))
+	}
+	printableSignature := true
+	for _, b := range signature {
+		if b < 0x20 || b > 0x7e {
+			printableSignature = false
+			break
+		}
+	}
+	if printableSignature {
+		t.Fatalf("Kubernetes token signature contains readable placeholder content: %q", signature)
+	}
+
+	credentialPaths := []string{
+		keyPath,
+		filepath.Join(home, ".aws", "credentials"),
+		filepath.Join(home, ".kube", "config"),
+		filepath.Join(home, ".env"),
+		filepath.Join(home, ".git-credentials"),
+		filepath.Join(home, ".npmrc"),
+	}
+	for _, path := range credentialPaths {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		lower := strings.ToLower(string(content))
+		for _, marker := range []string{"goaudit", "honeypot", "examplekey", "akiaiosfodnn7example"} {
+			if strings.Contains(lower, marker) {
+				t.Errorf("%s contains self-identifying marker %q", path, marker)
+			}
+		}
+	}
+}
+
 func TestWorkspaceHoneypotScript(t *testing.T) {
 	script := workspaceDotEnvScript()
 	if !strings.Contains(script, "/workspace/.env") {
 		t.Error("workspace honeypot missing /workspace/.env")
+	}
+	if strings.Contains(strings.ToLower(script), "goaudit") || strings.Contains(strings.ToLower(script), "honeypot") {
+		t.Error("workspace honeypot values must not identify the scanner")
 	}
 }
 
