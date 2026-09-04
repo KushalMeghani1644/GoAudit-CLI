@@ -27,6 +27,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes openssh-client
+          command -v ssh-keygen
+
       - name: Download dependencies
         run: go mod download
 

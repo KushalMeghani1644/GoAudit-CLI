@@ -43,6 +43,10 @@ func TestHoneypotScript(t *testing.T) {
 }
 
 func TestHoneypotCredentialsAreParseableAndUnmarked(t *testing.T) {
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		t.Fatal("ssh-keygen is required to validate the OpenSSH honeypot key")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -55,9 +59,6 @@ func TestHoneypotCredentialsAreParseableAndUnmarked(t *testing.T) {
 
 	keyPath := filepath.Join(home, ".ssh", "id_rsa")
 	t.Run("SSH key parses", func(t *testing.T) {
-		if _, err := exec.LookPath("ssh-keygen"); err != nil {
-			t.Skip("ssh-keygen is required to validate the OpenSSH honeypot key")
-		}
 		if output, err := exec.CommandContext(ctx, "ssh-keygen", "-y", "-f", keyPath).CombinedOutput(); err != nil {
 			t.Fatalf("honeypot SSH key does not parse: %v\n%s", err, output)
 		}
