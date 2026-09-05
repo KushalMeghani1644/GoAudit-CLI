@@ -26,7 +26,7 @@ const CacheDirEnvVar = "GOAUDIT_CACHE_DIR"
 const CacheRefreshAfter = 5 * 24 * time.Hour // 5 days
 
 // CacheVersion tracks the cache file format version.
-const CacheVersion = 1
+const CacheVersion = 2
 
 // CachedContainer holds metadata about a cached sandbox container.
 type CachedContainer struct {
@@ -34,7 +34,6 @@ type CachedContainer struct {
 	Image       string    `json:"image"`
 	Runtime     string    `json:"runtime"`
 	Profile     string    `json:"profile"`
-	RunAsRoot   bool      `json:"run_as_root"`
 	Network     bool      `json:"network_enabled"`
 	ImageDigest string    `json:"image_digest"`
 	CreatedAt   time.Time `json:"created_at"`
@@ -102,18 +101,18 @@ func ResolveCacheDir(dir string) (string, error) {
 	return filepath.Join(home, DefaultCacheSubdir), nil
 }
 
-// cacheKey builds the map key for runtime/profile plus execution policy.
-func cacheKey(runtime, profile string, runAsRoot, networkEnabled bool) string {
+// cacheKey builds the map key for runtime/profile plus network policy.
+func cacheKey(runtime, profile string, networkEnabled bool) string {
 	rt := runtime
 	if rt == "" {
 		rt = "runc"
 	}
-	return fmt.Sprintf("%s:%s:root=%t:net=%t", rt, profile, runAsRoot, networkEnabled)
+	return fmt.Sprintf("%s:%s:net=%t", rt, profile, networkEnabled)
 }
 
 // Lookup finds a valid cached container for the given runtime, profile, and policy.
 // Returns nil if no valid entry exists.
-func (cm *CacheManager) Lookup(ctx context.Context, runtime, profile string, runAsRoot, networkEnabled bool) *CachedContainer {
+func (cm *CacheManager) Lookup(ctx context.Context, runtime, profile string, networkEnabled bool) *CachedContainer {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
@@ -127,7 +126,7 @@ func (cm *CacheManager) Lookup(ctx context.Context, runtime, profile string, run
 		return nil
 	}
 
-	key := cacheKey(runtime, profile, runAsRoot, networkEnabled)
+	key := cacheKey(runtime, profile, networkEnabled)
 	entry, ok := cm.data.Containers[key]
 	if !ok {
 		return nil
@@ -145,7 +144,7 @@ func (cm *CacheManager) Lookup(ctx context.Context, runtime, profile string, run
 }
 
 // Store saves a cache entry for the given runtime, profile, and policy.
-func (cm *CacheManager) Store(ctx context.Context, runtime, profile string, runAsRoot, networkEnabled bool, containerID, img, digest string) error {
+func (cm *CacheManager) Store(ctx context.Context, runtime, profile string, networkEnabled bool, containerID, img, digest string) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
@@ -159,7 +158,7 @@ func (cm *CacheManager) Store(ctx context.Context, runtime, profile string, runA
 		return err
 	}
 
-	key := cacheKey(runtime, profile, runAsRoot, networkEnabled)
+	key := cacheKey(runtime, profile, networkEnabled)
 
 	// If there's an existing entry with a different container, remove the old one.
 	if old, ok := cm.data.Containers[key]; ok && old.ContainerID != containerID {
@@ -172,7 +171,6 @@ func (cm *CacheManager) Store(ctx context.Context, runtime, profile string, runA
 		Image:       img,
 		Runtime:     runtime,
 		Profile:     profile,
-		RunAsRoot:   runAsRoot,
 		Network:     networkEnabled,
 		ImageDigest: digest,
 		CreatedAt:   now,
@@ -183,7 +181,7 @@ func (cm *CacheManager) Store(ctx context.Context, runtime, profile string, runA
 }
 
 // TouchLastUsed updates the last-used timestamp for a cache entry.
-func (cm *CacheManager) TouchLastUsed(runtime, profile string, runAsRoot, networkEnabled bool) {
+func (cm *CacheManager) TouchLastUsed(runtime, profile string, networkEnabled bool) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
@@ -195,7 +193,7 @@ func (cm *CacheManager) TouchLastUsed(runtime, profile string, runAsRoot, networ
 
 	_ = cm.reloadLocked()
 
-	key := cacheKey(runtime, profile, runAsRoot, networkEnabled)
+	key := cacheKey(runtime, profile, networkEnabled)
 	if entry, ok := cm.data.Containers[key]; ok {
 		entry.LastUsed = time.Now()
 		_ = cm.saveLocked()
@@ -203,7 +201,7 @@ func (cm *CacheManager) TouchLastUsed(runtime, profile string, runAsRoot, networ
 }
 
 // Invalidate removes a specific cache entry and its container.
-func (cm *CacheManager) Invalidate(ctx context.Context, runtime, profile string, runAsRoot, networkEnabled bool) {
+func (cm *CacheManager) Invalidate(ctx context.Context, runtime, profile string, networkEnabled bool) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
@@ -216,7 +214,7 @@ func (cm *CacheManager) Invalidate(ctx context.Context, runtime, profile string,
 	if err := cm.reloadLocked(); err != nil {
 		return
 	}
-	key := cacheKey(runtime, profile, runAsRoot, networkEnabled)
+	key := cacheKey(runtime, profile, networkEnabled)
 	cm.removeEntryLocked(ctx, key)
 }
 

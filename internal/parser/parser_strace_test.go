@@ -347,29 +347,6 @@ func TestSetfsIDIsAlwaysAnAttempt(t *testing.T) {
 	}
 }
 
-func TestRootScanAddsPrivilegeEvidenceCaveat(t *testing.T) {
-	rep := report.NewReporter(true, false)
-	findings, err := ParseStream(
-		strings.NewReader("GOAUDIT_RUNTIME_META:phase=target\nsetuid(0) = 0"),
-		rep,
-		ParseOptions{RunAsRoot: true},
-	)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	f := findByReason(findings, "PRIVILEGE_ESCALATION_ATTEMPT")
-	if f == nil {
-		t.Fatal("expected downgraded privilege finding")
-	}
-	if !strings.Contains(f.Evidence, "Root scan:") {
-		t.Fatalf("expected root-scan caveat in evidence, got %q", f.Evidence)
-	}
-	verdict, _ := report.Evaluate(findings, report.EvaluationOptions{})
-	if verdict == report.VerdictMalicious {
-		t.Fatalf("scanner-induced root-ID transition must not be malicious, got %s", verdict)
-	}
-}
-
 func TestPrivilegeEscalationProbePhaseEvidence(t *testing.T) {
 	tests := []struct {
 		name       string

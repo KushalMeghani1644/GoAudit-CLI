@@ -136,7 +136,6 @@ var scanProjectCmd = &cobra.Command{
 			err := warmSandboxCache(context.Background(), profile, reporter, pipelineOptions{
 				projectPath:     proj.Root,
 				scanProjectMode: true,
-				runAsRoot:       runAsRoot,
 				probePackages:   probePackages,
 				skipProbe:       skipProbe,
 			})
@@ -152,7 +151,6 @@ var scanProjectCmd = &cobra.Command{
 			skipStatic:      true,
 			priorFindings:   findings,
 			scanProjectMode: true,
-			runAsRoot:       runAsRoot,
 			probePackages:   probePackages,
 			skipProbe:       skipProbe,
 			targetTimeout:   targetTimeout,
@@ -198,7 +196,6 @@ func init() {
 	scanProjectCmd.Flags().StringVar(&nodeImage, "node-image", "node:current-slim", "Node.js image used for npm/pnpm scans")
 	scanProjectCmd.Flags().StringVar(&bunImage, "bun-image", "oven/bun:1", "Bun image used for bun scans")
 	scanProjectCmd.Flags().StringVar(&networkMode, "network", "auto", "Network policy: auto (based on command type), on, or off")
-	scanProjectCmd.Flags().BoolVar(&runAsRoot, "run-as-root", false, "Run the target command as root inside the sandbox (default: non-root)")
 	scanProjectCmd.Flags().BoolVar(&skipProbe, "skip-probe", false, "Skip runtime behavior probe after install")
 	scanProjectCmd.Flags().BoolVar(&warmCache, "warm-cache", false, "Prepare and cache the sandbox without running a scan")
 	scanProjectCmd.Flags().BoolVar(&probeAll, "probe-all", false, "Probe all direct dependencies, not just suspicious ones")

@@ -20,7 +20,7 @@ Living tracker for the audit findings. Status reflects the current working tree.
 | Silent 3-package static cap | **Fixed** | Cap 25 + `STATIC_COVERAGE_LIMIT` finding |
 | Package-command not shell parsing | **Improved** | Wrappers (sudo/env/corepack/timeout/nice/…), quote strip; `PACKAGE_PARSE_INCOMPLETE` for pipes/substitutions; not a full shell parser |
 | Incomplete dynamic tracing / rename dest | **Mostly fixed** | rename dest + renameat2/link/mkdir/setuid family; added truncate/chown/mount/umount2/capset/sendfile/splice |
-| Cached sandboxes not reset | **Fixed** | `resetMutableStateScript` wipes home/tmp/caches before each warm scan; **no cache** for `--run-as-root` |
+| Cached sandboxes not reset | **Fixed** | `resetMutableStateScript` wipes home/tmp/caches before each warm scan |
 | Mutable images / pnpm@latest | **Improved** | Floating tags (`:latest`, `:current-slim`, …) always re-pulled; pnpm pinned to `9.15.9` |
 
 ### Coverage Gaps / Misleading Behavior
@@ -40,7 +40,6 @@ Living tracker for the audit findings. Status reflects the current working tree.
 - Perfect secret redaction for custom secret filenames under `--mount-project`
 - Private registry auth for static analysis
 - Exhaustive runtime API fuzzing / delayed malware paths
-- Snapshot-restore of full root filesystem after `--run-as-root` (cache disabled instead)
 - Semver range resolution without registry “latest” fallback (emits approximate finding)
 
 ### Verification

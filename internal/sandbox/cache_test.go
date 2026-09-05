@@ -12,18 +12,17 @@ import (
 func TestCacheKey(t *testing.T) {
 	tests := []struct {
 		runtime, profile string
-		root, net        bool
+		net              bool
 		want             string
 	}{
-		{"runsc", "npm", false, true, "runsc:npm:root=false:net=true"},
-		{"", "npm", false, false, "runc:npm:root=false:net=false"},
-		{"runc", "npm", true, false, "runc:npm:root=true:net=false"},
-		{"runsc", "pnpm", false, true, "runsc:pnpm:root=false:net=true"},
+		{"runsc", "npm", true, "runsc:npm:net=true"},
+		{"", "npm", false, "runc:npm:net=false"},
+		{"runsc", "pnpm", true, "runsc:pnpm:net=true"},
 	}
 	for _, tt := range tests {
-		got := cacheKey(tt.runtime, tt.profile, tt.root, tt.net)
+		got := cacheKey(tt.runtime, tt.profile, tt.net)
 		if got != tt.want {
-			t.Errorf("cacheKey(%q, %q, %t, %t) = %q, want %q", tt.runtime, tt.profile, tt.root, tt.net, got, tt.want)
+			t.Errorf("cacheKey(%q, %q, %t) = %q, want %q", tt.runtime, tt.profile, tt.net, got, tt.want)
 		}
 	}
 }
@@ -62,12 +61,11 @@ func TestCacheDataLoadSave(t *testing.T) {
 	data := CacheData{
 		Version: CacheVersion,
 		Containers: map[string]*CachedContainer{
-			"runsc:npm:root=false:net=true": {
+			"runsc:npm:net=true": {
 				ContainerID: "abc123",
 				Image:       "ghcr.io/test/image:latest",
 				Runtime:     "runsc",
 				Profile:     "npm",
-				RunAsRoot:   false,
 				Network:     true,
 				ImageDigest: "sha256:deadbeef",
 				CreatedAt:   time.Now().Add(-1 * time.Hour),
@@ -95,7 +93,7 @@ func TestCacheDataLoadSave(t *testing.T) {
 	if cm.data.Version != CacheVersion {
 		t.Errorf("version = %d, want %d", cm.data.Version, CacheVersion)
 	}
-	entry, ok := cm.data.Containers["runsc:npm:root=false:net=true"]
+	entry, ok := cm.data.Containers["runsc:npm:net=true"]
 	if !ok {
 		t.Fatal("expected runsc:npm entry")
 	}
@@ -107,7 +105,7 @@ func TestCacheDataLoadSave(t *testing.T) {
 	}
 
 	// Test save.
-	cm.data.Containers["runc:npm:root=false:net=false"] = &CachedContainer{
+	cm.data.Containers["runc:npm:net=false"] = &CachedContainer{
 		ContainerID: "def456",
 		Image:       "node:current-slim",
 		Runtime:     "",
@@ -131,7 +129,7 @@ func TestCacheDataLoadSave(t *testing.T) {
 	if len(cm2.data.Containers) != 2 {
 		t.Errorf("expected 2 entries, got %d", len(cm2.data.Containers))
 	}
-	if _, ok := cm2.data.Containers["runc:npm:root=false:net=false"]; !ok {
+	if _, ok := cm2.data.Containers["runc:npm:net=false"]; !ok {
 		t.Fatal("expected runc:npm entry after save+reload")
 	}
 }
@@ -196,8 +194,8 @@ func TestEntries(t *testing.T) {
 		data: &CacheData{
 			Version: CacheVersion,
 			Containers: map[string]*CachedContainer{
-				"runsc:npm:root=false:net=false": {ContainerID: "abc", Profile: "npm"},
-				"runc:bun:root=false:net=false":  {ContainerID: "def", Profile: "bun"},
+				"runsc:npm:net=false": {ContainerID: "abc", Profile: "npm"},
+				"runc:bun:net=false":  {ContainerID: "def", Profile: "bun"},
 			},
 		},
 	}
@@ -208,8 +206,8 @@ func TestEntries(t *testing.T) {
 	}
 
 	// Verify it's a copy (modifying shouldn't affect original).
-	entries["runsc:npm:root=false:net=false"].ContainerID = "modified"
-	if cm.data.Containers["runsc:npm:root=false:net=false"].ContainerID == "modified" {
+	entries["runsc:npm:net=false"].ContainerID = "modified"
+	if cm.data.Containers["runsc:npm:net=false"].ContainerID == "modified" {
 		t.Fatal("Entries() should return a copy, not a reference")
 	}
 }
@@ -241,11 +239,10 @@ func TestTouchLastUsed(t *testing.T) {
 		data: &CacheData{
 			Version: CacheVersion,
 			Containers: map[string]*CachedContainer{
-				"runsc:npm:root=false:net=true": {
+				"runsc:npm:net=true": {
 					ContainerID: "abc",
 					Profile:     "npm",
 					Runtime:     "runsc",
-					RunAsRoot:   false,
 					Network:     true,
 					LastUsed:    time.Now().Add(-24 * time.Hour),
 				},
@@ -253,9 +250,9 @@ func TestTouchLastUsed(t *testing.T) {
 		},
 	}
 
-	before := cm.data.Containers["runsc:npm:root=false:net=true"].LastUsed
-	cm.TouchLastUsed("runsc", "npm", false, true)
-	after := cm.data.Containers["runsc:npm:root=false:net=true"].LastUsed
+	before := cm.data.Containers["runsc:npm:net=true"].LastUsed
+	cm.TouchLastUsed("runsc", "npm", true)
+	after := cm.data.Containers["runsc:npm:net=true"].LastUsed
 
 	if !after.After(before) {
 		t.Error("TouchLastUsed should update LastUsed to a later time")
