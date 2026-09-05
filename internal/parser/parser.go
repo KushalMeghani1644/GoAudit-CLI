@@ -27,11 +27,16 @@ var (
 	netRegex  = regexp.MustCompile(`connect\(.*sa_family=(?:AF_INET|AF_INET6).*?sin6?_port=htons\((\d+)\).*?(?:inet_addr\("(.*?)"\)|inet_pton\([^,]+,\s*"(.*?)")`)
 	execRegex = regexp.MustCompile(`(?i)execve\(\"(.*?)\",\s*\[(.*?)\]`)
 	// Word boundary avoids matching "link(" inside "symlink(".
-	mutRegex    = regexp.MustCompile(`(?i)\b(?:chmod|fchmod|fchmodat|rename|renameat|renameat2|link|linkat|mkdir|mkdirat|unlink|unlinkat|truncate|ftruncate|chown|fchown|lchown|fchownat)\(`)
-	mountRegex  = regexp.MustCompile(`(?i)\b(?:mount|umount2)\(`)
-	capsetRegex = regexp.MustCompile(`(?i)\bcapset\(`)
-	privRegex   = regexp.MustCompile(`(?i)(setuid|setgid|seteuid|setegid|setreuid|setregid|setresuid|setresgid|setgroups)\(([^)]*)\)`)
-	chmodRegex  = regexp.MustCompile(`(?i)(?:chmod|fchmodat)\([^"]*"?([^",)]*)"?\s*,\s*0?([0-7]{3,4})`)
+	mutRegex             = regexp.MustCompile(`(?i)\b(?:chmod|fchmod|fchmodat|rename|renameat|renameat2|link|linkat|mkdir|mkdirat|unlink|unlinkat|truncate|ftruncate|chown|fchown|lchown|fchownat)\(`)
+	mountRegex           = regexp.MustCompile(`(?i)\b(?:mount|umount2)\(`)
+	capsetRegex          = regexp.MustCompile(`(?i)\bcapset\(`)
+	privRegex            = regexp.MustCompile(`(?i)(setuid|setgid|seteuid|setegid|setreuid|setregid|setresuid|setresgid|setfsuid|setfsgid|setgroups)\(([^)]*)\)`)
+	chmodRegex           = regexp.MustCompile(`(?i)(?:chmod|fchmodat)\([^"]*"?([^",)]*)"?\s*,\s*0?([0-7]{3,4})`)
+	fchmodRegex          = regexp.MustCompile(`(?i)\bfchmod\(\s*(\d+)\s*,\s*0?([0-7]{3,4})`)
+	kernelPrivilegeRegex = regexp.MustCompile(`(?i)\b(unshare|setns|clone|chroot|keyctl|bpf)\(`)
+	namespaceFlagRegex   = regexp.MustCompile(`(?i)\bCLONE_NEW(?:CGROUP|IPC|NET|NS|PID|TIME|USER|UTS)\b`)
+	keyctlPrivilegeRegex = regexp.MustCompile(`(?i)\bKEYCTL_(?:CHOWN|SETPERM|RESTRICT_KEYRING)\b`)
+	bpfPrivilegeRegex    = regexp.MustCompile(`(?i)\bBPF_(?:PROG_LOAD|PROG_ATTACH|PROG_DETACH|RAW_TRACEPOINT_OPEN|LINK_CREATE|LINK_UPDATE|BTF_LOAD|TOKEN_CREATE)\b`)
 
 	readCriticalPaths  = regexp.MustCompile(`(?i)((?:^|.*?/)\.env(?:\b|$)|.*?/\.ssh/.*?|.*?/\.aws/.*?|.*?/\.kube/.*?|.*?/\.git-credentials|.*?/\.npmrc|.*?id_rsa|^/etc/shadow$)`)
 	writeCriticalPaths = regexp.MustCompile(`(?i)(.*?/\.bashrc|.*?/\.zshrc|.*?/\.profile|.*?/\.ssh/authorized_keys|^/etc/crontab|^/etc/cron\..*|^/usr/local/bin/.*|^/usr/bin/.*|^/etc/passwd$|^/etc/shadow$)`)
@@ -56,6 +61,10 @@ type ParseOptions struct {
 
 	// ProbeExpected is true when the scan appended a runtime probe script.
 	ProbeExpected bool
+
+	// RunAsRoot marks findings whose success may only reflect the scanner's
+	// deliberately privileged execution context.
+	RunAsRoot bool
 }
 
 func ParseStream(r io.Reader, reporter *report.Reporter, opts ParseOptions) ([]report.Finding, error) {
@@ -114,6 +123,15 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 			if tag == "[runtime probe]" && f.Confidence < 95 && f.Severity != report.SeverityInfo {
 				f.Confidence += 5
 			}
+		}
+		if opts.RunAsRoot && f.Type == "privilege" {
+			// A successful transition to ID 0 while the scanner already runs as
+			// root does not demonstrate that the package escalated privileges.
+			if f.ReasonCode == "PRIVILEGE_ESCALATION" {
+				f.ReasonCode = "PRIVILEGE_ESCALATION_ATTEMPT"
+				f.Severity = report.SeverityWarning
+			}
+			f.Evidence = appendEvidence(f.Evidence, "Root scan: successful privileged operations may be scanner-induced and are not proof of escalation")
 		}
 		findings = append(findings, f)
 		reporter.PrintLiveFinding(f)
@@ -410,6 +428,30 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 			continue
 		}
 
+		// --- namespace and privileged kernel operations ---
+		if matches := kernelPrivilegeRegex.FindStringSubmatch(line); len(matches) > 1 {
+			syscall := strings.ToLower(matches[1])
+			if isPrivilegeRelevantKernelOperation(syscall, line) {
+				failed := strings.Contains(line, "= -1 ")
+				reason := "PRIVILEGED_KERNEL_OPERATION"
+				severity := report.SeverityCritical
+				confidence := 90
+				evidence := "Performed privilege-relevant kernel operation: " + syscall
+				if failed {
+					reason = "PRIVILEGED_KERNEL_OPERATION_ATTEMPT"
+					severity = report.SeverityWarning
+					confidence = 75
+					evidence = "Privilege-relevant kernel operation failed in sandbox: " + syscall
+				}
+				key := reason + ":" + syscall + ":" + phaseTag(probePhase, targetPhase)
+				if !seen[key] {
+					seen[key] = true
+					emit(report.Finding{Severity: severity, Type: "privilege", ReasonCode: reason, Path: line, Confidence: confidence, Evidence: evidence})
+				}
+			}
+			continue
+		}
+
 		// --- capset ---
 		// capset can raise, retain, drop, or clear capabilities. A syscall trace
 		// has no prior capability set, so even a non-zero result cannot prove an
@@ -444,7 +486,18 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 			case "setreuid", "setregid":
 				isRootEscalation = len(args) >= 2 && isRootNumericArg(args[1])
 			case "setresuid", "setresgid":
-				isRootEscalation = len(args) >= 3 && (isRootNumericArg(args[1]) || isRootNumericArg(args[2]))
+				isRootEscalation = len(args) >= 3 && (isRootNumericArg(args[0]) || isRootNumericArg(args[1]) || isRootNumericArg(args[2]))
+			case "setfsuid", "setfsgid":
+				// These calls return the previous filesystem ID rather than a
+				// success code, so the trace proves an attempt but not success.
+				if len(args) >= 1 && isRootNumericArg(args[0]) && targetPhase {
+					key := "PRIVILEGE_ESCALATION_ATTEMPT:" + syscall + ":" + strings.Join(args, ",") + ":" + phaseTag(probePhase, targetPhase)
+					if !seen[key] {
+						seen[key] = true
+						emit(report.Finding{Severity: report.SeverityWarning, Type: "privilege", ReasonCode: "PRIVILEGE_ESCALATION_ATTEMPT", Path: line, Confidence: 75, Evidence: "Attempted root filesystem UID/GID transition; syscall return value is the previous ID"})
+					}
+				}
+				continue
 			case "setgroups":
 				for _, arg := range args {
 					if isRootNumericArg(arg) {
@@ -600,6 +653,28 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 
 	findings = finalizeDynamicFindings(findings)
 	return findings, health, scanner.Err()
+}
+
+func isPrivilegeRelevantKernelOperation(syscall, line string) bool {
+	switch syscall {
+	case "clone", "unshare":
+		// Process creation and per-process resource isolation (for example,
+		// CLONE_FILES) are routine. Creating a kernel namespace is the
+		// privilege-relevant operation.
+		return namespaceFlagRegex.MatchString(line)
+	case "keyctl":
+		// Joining/creating a session keyring is available to ordinary callers.
+		// Retain operations that alter key ownership or access controls.
+		return keyctlPrivilegeRegex.MatchString(line)
+	case "bpf":
+		// Map reads/writes and object queries are routine uses of an existing
+		// BPF object; loading or attaching kernel code is privilege-relevant.
+		return bpfPrivilegeRegex.MatchString(line)
+	case "setns", "chroot":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseOpenPathFlags(line string) (string, string, bool) {
@@ -791,6 +866,13 @@ func appendPhaseEvidence(evidence, tag string) string {
 	return evidence + " " + tag
 }
 
+func appendEvidence(evidence, detail string) string {
+	if evidence == "" {
+		return detail
+	}
+	return evidence + "; " + detail
+}
+
 func phaseFromEvidence(evidence string) string {
 	if strings.Contains(evidence, "[runtime probe]") {
 		return "[runtime probe]"
@@ -851,6 +933,9 @@ func isRootNumericArg(arg string) bool {
 }
 
 func parseChmodModePath(line string) (string, string, bool) {
+	if match := fchmodRegex.FindStringSubmatch(line); len(match) == 3 {
+		return "fd " + match[1], match[2], true
+	}
 	m := chmodRegex.FindStringSubmatch(line)
 	if len(m) > 2 && m[1] != "" && m[2] != "" {
 		return m[1], m[2], true

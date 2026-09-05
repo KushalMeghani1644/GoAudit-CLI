@@ -197,7 +197,7 @@ func (s *Sandbox) RunProjectCommand(ctx context.Context, targetCmd, probeScript,
 }
 
 // StraceTraceSet is the full set of syscalls traced by GoAudit.
-const StraceTraceSet = "open,openat,openat2,connect,execve,chmod,fchmod,fchmodat,rename,renameat,renameat2,link,linkat,mkdir,mkdirat,unlink,unlinkat,truncate,ftruncate,chown,fchown,lchown,fchownat,mount,umount2,capset,setuid,setgid,setreuid,setregid,setresuid,setresgid,setgroups,socket,bind,listen,symlink,symlinkat,memfd_create,ptrace,sendto,sendmsg,sendmmsg,sendfile,splice"
+const StraceTraceSet = "open,openat,openat2,connect,execve,chmod,fchmod,fchmodat,rename,renameat,renameat2,link,linkat,mkdir,mkdirat,unlink,unlinkat,truncate,ftruncate,chown,fchown,lchown,fchownat,mount,umount2,capset,setuid,setgid,setreuid,setregid,setresuid,setresgid,setfsuid,setfsgid,setgroups,unshare,setns,clone,chroot,keyctl,bpf,socket,bind,listen,symlink,symlinkat,memfd_create,ptrace,sendto,sendmsg,sendmmsg,sendfile,splice"
 
 const targetTimeout = "180s"
 const defaultProbeTimeout = "30s"

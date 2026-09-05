@@ -63,5 +63,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - name: Build node sandbox image
         run: docker build --pull -t goaudit-node-sandbox:ci -f docker/Dockerfile.node-sandbox .
+
+      - name: Build CLI
+        run: go build -trimpath -o ./goaudit ./cmd/goaudit
+
+      - name: Test privilege escalation fixtures
+        run: ./scripts/test-privilege-escalation-e2e.sh

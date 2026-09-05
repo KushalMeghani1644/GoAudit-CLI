@@ -222,7 +222,7 @@ func isPrivilegeWarning(f Finding) bool {
 	switch f.ReasonCode {
 	case "PRIVILEGE_ESCALATION_ATTEMPT", "PRIVILEGE_ESCALATION_EXEC", "SUID_SGID_BIT_SET",
 		"CAPABILITY_ESCALATION", "CAPABILITY_CHANGE", "NAMESPACE_ESCAPE_ATTEMPT", "LD_PRELOAD_PRIVILEGE_ATTEMPT",
-		"ACCOUNT_FILE_ACCESS", "MOUNT_OPERATION_ATTEMPT":
+		"ACCOUNT_FILE_ACCESS", "MOUNT_OPERATION_ATTEMPT", "PRIVILEGED_KERNEL_OPERATION_ATTEMPT":
 		return true
 	default:
 		return false
@@ -243,6 +243,7 @@ func isHardMalicious(f Finding) bool {
 		f.ReasonCode == "LD_PRELOAD_PRIVILEGE_ATTEMPT" ||
 		f.ReasonCode == "OWNERSHIP_CHANGE" ||
 		f.ReasonCode == "MOUNT_OPERATION" ||
+		f.ReasonCode == "PRIVILEGED_KERNEL_OPERATION" ||
 		f.ReasonCode == "FILELESS_EXEC" ||
 		f.ReasonCode == "PROCESS_INJECTION" ||
 		f.ReasonCode == "ENV_THEFT" ||
@@ -252,7 +253,7 @@ func isHardMalicious(f Finding) bool {
 
 func reasonWeight(reasonCode string) int {
 	switch reasonCode {
-	case "CREDENTIAL_READ", "PERSISTENCE_WRITE", "PRIVILEGE_ESCALATION", "ENV_THEFT", "DATA_EXFIL", "OWNERSHIP_CHANGE", "MOUNT_OPERATION":
+	case "CREDENTIAL_READ", "PERSISTENCE_WRITE", "PRIVILEGE_ESCALATION", "ENV_THEFT", "DATA_EXFIL", "OWNERSHIP_CHANGE", "MOUNT_OPERATION", "PRIVILEGED_KERNEL_OPERATION":
 		return 80
 	case "ACCOUNT_FILE_ACCESS":
 		// Warning-level attempts (e.g. denied /etc/shadow) should be suspicious, not
@@ -266,7 +267,7 @@ func reasonWeight(reasonCode string) int {
 		return 30
 	case "PRIVILEGE_ESCALATION_ATTEMPT", "PRIVILEGE_ESCALATION_EXEC":
 		return 45
-	case "MOUNT_OPERATION_ATTEMPT":
+	case "MOUNT_OPERATION_ATTEMPT", "PRIVILEGED_KERNEL_OPERATION_ATTEMPT":
 		return 45
 	case "CREDENTIAL_READ_WITH_OUTBOUND":
 		return 50
@@ -329,6 +330,18 @@ func reasonWeight(reasonCode string) int {
 		return 15
 	}
 }
+
+func isPrivilegeAttempt(f Finding) bool {
+	switch f.ReasonCode {
+	case "PRIVILEGE_ESCALATION_ATTEMPT", "MOUNT_OPERATION_ATTEMPT", "PRIVILEGED_KERNEL_OPERATION_ATTEMPT":
+		return true
+	case "ACCOUNT_FILE_ACCESS":
+		return f.Severity == SeverityWarning
+	default:
+		return false
+	}
+}
+
 func isExpectedBehaviorReason(reasonCode string) bool {
 	switch reasonCode {
 	case "NPM_LIFECYCLE_SCRIPTS", "PNPM_LIFECYCLE_SCRIPTS", "BUN_INSTALL_SCRIPTS", "EXTERNAL_NETWORK_REGISTRY":
@@ -380,6 +393,18 @@ func Evaluate(findings []Finding, opts EvaluationOptions) (Verdict, int) {
 			continue
 		}
 		w := reasonWeight(f.ReasonCode)
+		if isPrivilegeAttempt(f) {
+			// Failed privilege probes are one behavioral signal. Different syscall
+			// families from the same lifecycle command must not stack into a
+			// MALICIOUS verdict without a successful operation.
+			const group = "PRIVILEGE_OPERATION_ATTEMPT"
+			if seenReasonWeight[group] >= w {
+				continue
+			}
+			score += w - seenReasonWeight[group]
+			seenReasonWeight[group] = w
+			continue
+		}
 		if f.ReasonCode == "EXTERNAL_NETWORK" || f.ReasonCode == "EXTERNAL_NETWORK_REGISTRY" {
 			// Cap total network contribution at 10 to avoid flooding the score.
 			if seenReasonWeight[f.ReasonCode] >= 10 {
