@@ -30,7 +30,7 @@ var suspiciousScriptPatterns = []struct {
 	{"PERSISTENCE_WRITE", regexp.MustCompile(`(?i)(/etc/cron|crontab|\.bashrc|\.zshrc|/etc/profile|authorized_keys)`), report.SeverityCritical, 90},
 	{"CREDENTIAL_READ", regexp.MustCompile(`(?i)(\.aws/credentials|id_rsa|\.kube/config|\.env|\.git-credentials|\.npmrc)`), report.SeverityCritical, 85},
 	{"REVERSE_SHELL", regexp.MustCompile(`(?i)(/dev/tcp/|nc\s+-e|bash\s+-i)`), report.SeverityCritical, 95},
-	{"SUID_SGID_BIT_SET", regexp.MustCompile(`(?i)\bchmod(?:\s+--?[^\s]+)*\s+(?:0?[2-7][0-7]{3}|(?:u|g|\+)[+,a-z]*s)\s+(?:/usr/(?:local/)?bin/|/(?:s?bin|etc)/)`), report.SeverityCritical, 90},
+	{"SUID_SGID_BIT_SET", regexp.MustCompile(`(?i)\bchmod(?:\s+--?[^\s]+)*\s+(?:0?[2-7][0-7]{3}|(?:a|u|g|\+)[+,a-z]*s)\s+(?:/usr/(?:local/)?bin/|/(?:s?bin|etc)/)`), report.SeverityCritical, 90},
 }
 
 func AnalyzeRemoteScripts(seedURLs []string, maxDepth int) []report.Finding {

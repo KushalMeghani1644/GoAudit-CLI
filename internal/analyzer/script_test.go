@@ -65,6 +65,7 @@ func TestAnalyzeScriptBodyDetectsSUIDPlanting(t *testing.T) {
 		"chmod 4755 /usr/local/bin/update-helper",
 		"chmod 04755 /usr/bin/update-helper",
 		"chmod u+s /bin/update-helper",
+		"chmod a+s /usr/bin/update-helper",
 	} {
 		t.Run(body, func(t *testing.T) {
 			findings := analyzeScriptBody("package.json:postinstall", body)

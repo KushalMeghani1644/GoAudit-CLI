@@ -331,10 +331,12 @@ func reasonWeight(reasonCode string) int {
 	}
 }
 
-func isPrivilegeAttemptReason(reasonCode string) bool {
-	switch reasonCode {
+func isPrivilegeAttempt(f Finding) bool {
+	switch f.ReasonCode {
 	case "PRIVILEGE_ESCALATION_ATTEMPT", "MOUNT_OPERATION_ATTEMPT", "PRIVILEGED_KERNEL_OPERATION_ATTEMPT":
 		return true
+	case "ACCOUNT_FILE_ACCESS":
+		return f.Severity == SeverityWarning
 	default:
 		return false
 	}
@@ -391,7 +393,7 @@ func Evaluate(findings []Finding, opts EvaluationOptions) (Verdict, int) {
 			continue
 		}
 		w := reasonWeight(f.ReasonCode)
-		if isPrivilegeAttemptReason(f.ReasonCode) {
+		if isPrivilegeAttempt(f) {
 			// Failed privilege probes are one behavioral signal. Different syscall
 			// families from the same lifecycle command must not stack into a
 			// MALICIOUS verdict without a successful operation.

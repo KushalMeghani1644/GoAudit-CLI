@@ -126,6 +126,7 @@ func TestFailedPrivilegeOperationsShareSuspiciousCeiling(t *testing.T) {
 		{Severity: SeverityWarning, ReasonCode: "PRIVILEGE_ESCALATION_ATTEMPT"},
 		{Severity: SeverityWarning, ReasonCode: "MOUNT_OPERATION_ATTEMPT"},
 		{Severity: SeverityWarning, ReasonCode: "PRIVILEGED_KERNEL_OPERATION_ATTEMPT"},
+		{Severity: SeverityWarning, ReasonCode: "ACCOUNT_FILE_ACCESS"},
 	}, defaultOpts)
 	if verdict != VerdictSuspicious {
 		t.Fatalf("expected failed privilege operations to remain suspicious, got %s", verdict)

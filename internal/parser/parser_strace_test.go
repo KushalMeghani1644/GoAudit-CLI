@@ -357,12 +357,16 @@ func TestRootScanAddsPrivilegeEvidenceCaveat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	f := findByReason(findings, "PRIVILEGE_ESCALATION")
+	f := findByReason(findings, "PRIVILEGE_ESCALATION_ATTEMPT")
 	if f == nil {
-		t.Fatal("expected privilege finding")
+		t.Fatal("expected downgraded privilege finding")
 	}
 	if !strings.Contains(f.Evidence, "Root scan:") {
 		t.Fatalf("expected root-scan caveat in evidence, got %q", f.Evidence)
+	}
+	verdict, _ := report.Evaluate(findings, report.EvaluationOptions{})
+	if verdict == report.VerdictMalicious {
+		t.Fatalf("scanner-induced root-ID transition must not be malicious, got %s", verdict)
 	}
 }
 
@@ -454,7 +458,7 @@ func TestDetectsPrivilegedKernelOperations(t *testing.T) {
 		{name: "setns success", line: "setns(4, CLONE_NEWNS) = 0", reason: "PRIVILEGED_KERNEL_OPERATION", severity: report.SeverityCritical},
 		{name: "clone user namespace", line: "clone(child_stack=NULL, flags=CLONE_NEWUSER|SIGCHLD) = 42", reason: "PRIVILEGED_KERNEL_OPERATION", severity: report.SeverityCritical},
 		{name: "chroot failed", line: `chroot("/tmp/root") = -1 EPERM (Operation not permitted)`, reason: "PRIVILEGED_KERNEL_OPERATION_ATTEMPT", severity: report.SeverityWarning},
-		{name: "keyctl success", line: `keyctl(KEYCTL_JOIN_SESSION_KEYRING, "x") = 1`, reason: "PRIVILEGED_KERNEL_OPERATION", severity: report.SeverityCritical},
+		{name: "keyctl permissions", line: `keyctl(KEYCTL_SETPERM, 123, 0x3f3f3f3f) = 0`, reason: "PRIVILEGED_KERNEL_OPERATION", severity: report.SeverityCritical},
 		{name: "bpf failed", line: "bpf(BPF_PROG_LOAD, {}) = -1 EPERM (Operation not permitted)", reason: "PRIVILEGED_KERNEL_OPERATION_ATTEMPT", severity: report.SeverityWarning},
 	}
 	for _, tt := range tests {
@@ -470,10 +474,19 @@ func TestDetectsPrivilegedKernelOperations(t *testing.T) {
 	}
 }
 
-func TestIgnoresOrdinaryClone(t *testing.T) {
-	findings := parse(t, "GOAUDIT_RUNTIME_META:phase=target\nclone(child_stack=NULL, flags=SIGCHLD) = 42")
-	if findByReason(findings, "PRIVILEGED_KERNEL_OPERATION") != nil {
-		t.Fatal("ordinary process creation must not be treated as a privileged kernel operation")
+func TestIgnoresOrdinaryKernelOperations(t *testing.T) {
+	for _, line := range []string{
+		"clone(child_stack=NULL, flags=SIGCHLD) = 42",
+		"unshare(CLONE_FILES) = 0",
+		`keyctl(KEYCTL_JOIN_SESSION_KEYRING, "x") = 1`,
+		"bpf(BPF_MAP_LOOKUP_ELEM, {map_fd=3}) = 0",
+	} {
+		t.Run(line, func(t *testing.T) {
+			findings := parse(t, "GOAUDIT_RUNTIME_META:phase=target\n"+line)
+			if findByReason(findings, "PRIVILEGED_KERNEL_OPERATION") != nil {
+				t.Fatalf("%s must not be treated as a privileged kernel operation", line)
+			}
+		})
 	}
 }
 

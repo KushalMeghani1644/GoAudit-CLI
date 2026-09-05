@@ -34,7 +34,9 @@ var (
 	chmodRegex           = regexp.MustCompile(`(?i)(?:chmod|fchmodat)\([^"]*"?([^",)]*)"?\s*,\s*0?([0-7]{3,4})`)
 	fchmodRegex          = regexp.MustCompile(`(?i)\bfchmod\(\s*(\d+)\s*,\s*0?([0-7]{3,4})`)
 	kernelPrivilegeRegex = regexp.MustCompile(`(?i)\b(unshare|setns|clone|chroot|keyctl|bpf)\(`)
-	cloneNewUserRegex    = regexp.MustCompile(`(?i)\bclone\(.*CLONE_NEWUSER`)
+	namespaceFlagRegex   = regexp.MustCompile(`(?i)\bCLONE_NEW(?:CGROUP|IPC|NET|NS|PID|TIME|USER|UTS)\b`)
+	keyctlPrivilegeRegex = regexp.MustCompile(`(?i)\bKEYCTL_(?:CHOWN|SETPERM|RESTRICT_KEYRING)\b`)
+	bpfPrivilegeRegex    = regexp.MustCompile(`(?i)\bBPF_(?:PROG_LOAD|PROG_ATTACH|PROG_DETACH|RAW_TRACEPOINT_OPEN|LINK_CREATE|LINK_UPDATE|BTF_LOAD|TOKEN_CREATE)\b`)
 
 	readCriticalPaths  = regexp.MustCompile(`(?i)((?:^|.*?/)\.env(?:\b|$)|.*?/\.ssh/.*?|.*?/\.aws/.*?|.*?/\.kube/.*?|.*?/\.git-credentials|.*?/\.npmrc|.*?id_rsa|^/etc/shadow$)`)
 	writeCriticalPaths = regexp.MustCompile(`(?i)(.*?/\.bashrc|.*?/\.zshrc|.*?/\.profile|.*?/\.ssh/authorized_keys|^/etc/crontab|^/etc/cron\..*|^/usr/local/bin/.*|^/usr/bin/.*|^/etc/passwd$|^/etc/shadow$)`)
@@ -123,6 +125,12 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 			}
 		}
 		if opts.RunAsRoot && f.Type == "privilege" {
+			// A successful transition to ID 0 while the scanner already runs as
+			// root does not demonstrate that the package escalated privileges.
+			if f.ReasonCode == "PRIVILEGE_ESCALATION" {
+				f.ReasonCode = "PRIVILEGE_ESCALATION_ATTEMPT"
+				f.Severity = report.SeverityWarning
+			}
 			f.Evidence = appendEvidence(f.Evidence, "Root scan: successful privileged operations may be scanner-induced and are not proof of escalation")
 		}
 		findings = append(findings, f)
@@ -423,8 +431,7 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 		// --- namespace and privileged kernel operations ---
 		if matches := kernelPrivilegeRegex.FindStringSubmatch(line); len(matches) > 1 {
 			syscall := strings.ToLower(matches[1])
-			// clone is ubiquitous; only namespace creation is privilege-relevant.
-			if syscall != "clone" || cloneNewUserRegex.MatchString(line) {
+			if isPrivilegeRelevantKernelOperation(syscall, line) {
 				failed := strings.Contains(line, "= -1 ")
 				reason := "PRIVILEGED_KERNEL_OPERATION"
 				severity := report.SeverityCritical
@@ -646,6 +653,28 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 
 	findings = finalizeDynamicFindings(findings)
 	return findings, health, scanner.Err()
+}
+
+func isPrivilegeRelevantKernelOperation(syscall, line string) bool {
+	switch syscall {
+	case "clone", "unshare":
+		// Process creation and per-process resource isolation (for example,
+		// CLONE_FILES) are routine. Creating a kernel namespace is the
+		// privilege-relevant operation.
+		return namespaceFlagRegex.MatchString(line)
+	case "keyctl":
+		// Joining/creating a session keyring is available to ordinary callers.
+		// Retain operations that alter key ownership or access controls.
+		return keyctlPrivilegeRegex.MatchString(line)
+	case "bpf":
+		// Map reads/writes and object queries are routine uses of an existing
+		// BPF object; loading or attaching kernel code is privilege-relevant.
+		return bpfPrivilegeRegex.MatchString(line)
+	case "setns", "chroot":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseOpenPathFlags(line string) (string, string, bool) {
