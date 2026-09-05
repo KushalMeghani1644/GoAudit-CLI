@@ -20,7 +20,6 @@ var (
 	nodeImage      string
 	bunImage       string
 	networkMode    string
-	runAsRoot      bool
 	skipProbe      bool
 	noCache        bool
 	warmCache      bool
@@ -75,7 +74,6 @@ var scanCmd = &cobra.Command{
 			err := warmSandboxCache(context.Background(), profile, reporter, pipelineOptions{
 				projectPath:    projectPath,
 				runtimeCommand: runtimeTargetCmd,
-				runAsRoot:      runAsRoot,
 				probePackages:  probePackages,
 				skipProbe:      skipProbe,
 			})
@@ -90,7 +88,6 @@ var scanCmd = &cobra.Command{
 			projectPath:    projectPath,
 			runtimeCommand: runtimeTargetCmd,
 			priorFindings:  localFindings,
-			runAsRoot:      runAsRoot,
 			probePackages:  probePackages,
 			skipProbe:      skipProbe,
 			targetTimeout:  targetTimeout,
@@ -180,7 +177,6 @@ func init() {
 	scanCmd.Flags().StringVar(&nodeImage, "node-image", "node:current-slim", "Node.js image used for npm/pnpm scans")
 	scanCmd.Flags().StringVar(&bunImage, "bun-image", "oven/bun:1", "Bun image used for bun scans")
 	scanCmd.Flags().StringVar(&networkMode, "network", "auto", "Network policy: auto (based on command type), on, or off")
-	scanCmd.Flags().BoolVar(&runAsRoot, "run-as-root", false, "Run the target command as root inside the sandbox")
 	scanCmd.Flags().BoolVar(&skipProbe, "skip-probe", false, "Skip runtime behavior probe after install")
 	scanCmd.Flags().BoolVar(&noCache, "no-cache", false, "Disable sandbox caching for this run (no warm container is stored)")
 	scanCmd.Flags().BoolVar(&warmCache, "warm-cache", false, "Prepare and cache the sandbox without running a scan")

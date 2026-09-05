@@ -61,10 +61,6 @@ type ParseOptions struct {
 
 	// ProbeExpected is true when the scan appended a runtime probe script.
 	ProbeExpected bool
-
-	// RunAsRoot marks findings whose success may only reflect the scanner's
-	// deliberately privileged execution context.
-	RunAsRoot bool
 }
 
 func ParseStream(r io.Reader, reporter *report.Reporter, opts ParseOptions) ([]report.Finding, error) {
@@ -123,15 +119,6 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 			if tag == "[runtime probe]" && f.Confidence < 95 && f.Severity != report.SeverityInfo {
 				f.Confidence += 5
 			}
-		}
-		if opts.RunAsRoot && f.Type == "privilege" {
-			// A successful transition to ID 0 while the scanner already runs as
-			// root does not demonstrate that the package escalated privileges.
-			if f.ReasonCode == "PRIVILEGE_ESCALATION" {
-				f.ReasonCode = "PRIVILEGE_ESCALATION_ATTEMPT"
-				f.Severity = report.SeverityWarning
-			}
-			f.Evidence = appendEvidence(f.Evidence, "Root scan: successful privileged operations may be scanner-induced and are not proof of escalation")
 		}
 		findings = append(findings, f)
 		reporter.PrintLiveFinding(f)

@@ -42,7 +42,6 @@ Common flags (both `scan` and `scan-project` unless noted):
 | `--fail-on` | Exit non-zero on `malicious`, `inconclusive`, or both (default: `never`) |
 | `--warm-cache` | Prepare the sandbox without running a scan |
 | `--no-cache` | Do not store a warm container after this run |
-| `--run-as-root` | Run the target command as root in the sandbox |
 | `--timeout` | Max time for the install command |
 | `--probe-timeout` | Max time for the runtime probe (default: 30s) |
 | `--mount-cwd` | `scan` only: allow mounting CWD for multi-local package installs |
@@ -150,7 +149,7 @@ goaudit cache clean --runtime runsc
 goaudit cache clean --runtime runc
 ```
 
-Use `--cache-dir` or `GOAUDIT_CACHE_DIR` to store cache entries elsewhere. Scans with `--run-as-root` do not use the warm cache.
+Use `--cache-dir` or `GOAUDIT_CACHE_DIR` to store cache entries elsewhere. Target commands and runtime probes always execute as an unprivileged sandbox user.
 
 ## Requirements
 

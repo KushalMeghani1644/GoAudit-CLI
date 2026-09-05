@@ -20,7 +20,6 @@ type pipelineOptions struct {
 	skipStatic      bool
 	priorFindings   []report.Finding
 	allowNetwork    bool
-	runAsRoot       bool
 	scanProjectMode bool
 	probePackages   []string
 	skipProbe       bool
@@ -148,7 +147,6 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 
 	s, err := sandbox.NewSandbox(ctx, profile.Image, sandbox.SandboxOptions{
 		NetworkEnabled: networkEnabled,
-		RunAsRoot:      opts.runAsRoot,
 	})
 	if err != nil {
 		reporter.StopProgress()
@@ -166,7 +164,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 	var cache *sandbox.CacheManager
 	usedCache := false
 	forcedRuncOffline := false
-	if !noCache && !opts.runAsRoot {
+	if !noCache {
 		cache, err = sandbox.NewCacheManager(cacheDir)
 		if err != nil && !ciMode {
 			fmt.Printf("\033[33m[WARNING] Could not initialize cache: %v. Running without cache.\033[0m\r\n", err)
@@ -178,10 +176,10 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 
 	// Try to use cached sandbox if available.
 	if cache != nil && opts.projectPath == "" {
-		cached := cache.Lookup(ctx, s.Runtime(), profile.Name, opts.runAsRoot, networkEnabled)
+		cached := cache.Lookup(ctx, s.Runtime(), profile.Name, networkEnabled)
 		if cached != nil {
 			if cached.Image != profile.Image {
-				cache.Invalidate(ctx, cached.Runtime, profile.Name, cached.RunAsRoot, cached.Network)
+				cache.Invalidate(ctx, cached.Runtime, profile.Name, cached.Network)
 				cached = nil
 			}
 		}
@@ -191,7 +189,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 				if offline && cached.Runtime == "runsc" && isNodeProfile(profile.Name) {
 					forcedRuncOffline = true
 				}
-				cache.Invalidate(ctx, cached.Runtime, profile.Name, cached.RunAsRoot, cached.Network)
+				cache.Invalidate(ctx, cached.Runtime, profile.Name, cached.Network)
 				cached = nil
 			}
 		}
@@ -205,13 +203,13 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 				} else {
 					s.SetRuntime("")
 				}
-				cache.TouchLastUsed(cached.Runtime, profile.Name, cached.RunAsRoot, cached.Network)
+				cache.TouchLastUsed(cached.Runtime, profile.Name, cached.Network)
 				usedCache = true
 				// Update profile image to match the cached one.
 				profile.Image = cached.Image
 			} else {
 				// Image changed, invalidate old cache.
-				cache.Invalidate(ctx, cached.Runtime, profile.Name, cached.RunAsRoot, cached.Network)
+				cache.Invalidate(ctx, cached.Runtime, profile.Name, cached.Network)
 			}
 		}
 	}
@@ -265,13 +263,13 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 
 				// Check runc cache before pulling again.
 				if cache != nil && opts.projectPath == "" {
-					runcCached := cache.Lookup(ctx, "", profile.Name, opts.runAsRoot, networkEnabled)
+					runcCached := cache.Lookup(ctx, "", profile.Name, networkEnabled)
 					if runcCached != nil && runcCached.Image == profile.Image && !cache.ImageChanged(ctx, runcCached.Image, runcCached.ImageDigest) {
 						reporter.UpdateProgress("Using cached runc sandbox...")
 						s.SetContainerID(runcCached.ContainerID)
 						s.SetImage(runcCached.Image)
 						profile.Image = runcCached.Image
-						cache.TouchLastUsed("", profile.Name, runcCached.RunAsRoot, runcCached.Network)
+						cache.TouchLastUsed("", profile.Name, runcCached.Network)
 						usedCache = true
 					}
 				}
@@ -309,7 +307,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 		if err != nil {
 			// Cache might be stale; invalidate and fall through to cold path.
 			if cache != nil {
-				cache.Invalidate(ctx, s.Runtime(), profile.Name, opts.runAsRoot, networkEnabled)
+				cache.Invalidate(ctx, s.Runtime(), profile.Name, networkEnabled)
 			}
 			s.Cleanup(ctx, false)
 			if !ciMode {
@@ -360,13 +358,13 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 
 		usedRuncCache := false
 		if cache != nil && opts.projectPath == "" {
-			runcCached := cache.Lookup(ctx, "", profile.Name, opts.runAsRoot, networkEnabled)
+			runcCached := cache.Lookup(ctx, "", profile.Name, networkEnabled)
 			if runcCached != nil && runcCached.Image == profile.Image && !cache.ImageChanged(ctx, runcCached.Image, runcCached.ImageDigest) {
 				reporter.UpdateProgress("Using cached runc sandbox...")
 				s.SetContainerID(runcCached.ContainerID)
 				s.SetImage(runcCached.Image)
 				profile.Image = runcCached.Image
-				cache.TouchLastUsed("", profile.Name, opts.runAsRoot, networkEnabled)
+				cache.TouchLastUsed("", profile.Name, networkEnabled)
 				usedRuncCache = true
 			}
 		}
@@ -398,11 +396,10 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 	findings = append(findings, dynamicFindings...)
 
 	// Cache the warm container for next time (if caching is enabled and we did a cold run).
-	if cache != nil && !noCache && !usedCache && opts.projectPath == "" && !opts.runAsRoot {
+	if cache != nil && !noCache && !usedCache && opts.projectPath == "" {
 		// Warm-prepare a fresh container for the cache.
 		reporter.UpdateProgress("Warming sandbox cache...")
 		warmSandbox, warmErr := sandbox.NewSandbox(ctx, s.Image(), sandbox.SandboxOptions{
-			RunAsRoot:      opts.runAsRoot,
 			NetworkEnabled: networkEnabled,
 		})
 		if warmErr == nil {
@@ -413,7 +410,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 				if digestErr != nil {
 					digest = cache.LocalImageDigest(ctx, s.Image())
 				}
-				if storeErr := cache.Store(ctx, s.Runtime(), profile.Name, opts.runAsRoot, networkEnabled, warmSandbox.ContainerID(), s.Image(), digest); storeErr != nil && !ciMode {
+				if storeErr := cache.Store(ctx, s.Runtime(), profile.Name, networkEnabled, warmSandbox.ContainerID(), s.Image(), digest); storeErr != nil && !ciMode {
 					fmt.Printf("\033[33m[WARNING] Could not save cache: %v\033[0m\r\n", storeErr)
 				}
 			} else {
@@ -477,9 +474,6 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 	if noCache {
 		return fmt.Errorf("--warm-cache cannot be used with --no-cache")
 	}
-	if opts.runAsRoot {
-		return fmt.Errorf("--warm-cache cannot be used with --run-as-root (root scans can mutate system tools)")
-	}
 	if opts.projectPath != "" {
 		return fmt.Errorf("--warm-cache cannot be used for project-staged scans yet")
 	}
@@ -497,7 +491,6 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 
 	s, err := sandbox.NewSandbox(ctx, profile.Image, sandbox.SandboxOptions{
 		NetworkEnabled: networkEnabled,
-		RunAsRoot:      opts.runAsRoot,
 	})
 	if err != nil {
 		reporter.StopProgress()
@@ -509,10 +502,10 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 		s.SetImage(profile.Image)
 	}
 
-	if cached := cache.Lookup(ctx, s.Runtime(), profile.Name, opts.runAsRoot, networkEnabled); cached != nil {
+	if cached := cache.Lookup(ctx, s.Runtime(), profile.Name, networkEnabled); cached != nil {
 		refresh, offline := cache.ShouldRefreshLatest(ctx, cached)
 		if refresh {
-			cache.Invalidate(ctx, cached.Runtime, profile.Name, cached.RunAsRoot, cached.Network)
+			cache.Invalidate(ctx, cached.Runtime, profile.Name, cached.Network)
 			cached = nil
 			if offline && s.Runtime() == "runsc" && isNodeProfile(profile.Name) {
 				if !ciMode {
@@ -549,7 +542,7 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 			s.SetRuntime("")
 			profile.Image = defaultImageForProfile(profile.Name)
 			s.SetImage(profile.Image)
-			if cached := cache.Lookup(ctx, "", profile.Name, opts.runAsRoot, networkEnabled); cached != nil && cached.Image == profile.Image && !cache.ImageChanged(ctx, cached.Image, cached.ImageDigest) {
+			if cached := cache.Lookup(ctx, "", profile.Name, networkEnabled); cached != nil && cached.Image == profile.Image && !cache.ImageChanged(ctx, cached.Image, cached.ImageDigest) {
 				reporter.StopProgress()
 				if !ciMode {
 					fmt.Printf("Sandbox cache is already warm for %s (runc).\n", profile.Name)
@@ -576,7 +569,7 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 	if digestErr != nil {
 		digest = cache.LocalImageDigest(ctx, s.Image())
 	}
-	if err := cache.Store(ctx, s.Runtime(), profile.Name, opts.runAsRoot, networkEnabled, s.ContainerID(), s.Image(), digest); err != nil {
+	if err := cache.Store(ctx, s.Runtime(), profile.Name, networkEnabled, s.ContainerID(), s.Image(), digest); err != nil {
 		s.Cleanup(ctx, false)
 		reporter.StopProgress()
 		return fmt.Errorf("failed to save cache: %w", err)
@@ -621,7 +614,6 @@ func runSandboxAndParse(
 	dynamicFindings, traceHealth, err := parser.ParseStreamWithHealth(logStream, reporter, parser.ParseOptions{
 		KnownRegistryIPs: registryIPs,
 		ProbeExpected:    len(opts.probePackages) > 0 && !opts.skipProbe,
-		RunAsRoot:        opts.runAsRoot,
 	})
 	if err != nil {
 		return nil, "", traceHealth, err
@@ -657,7 +649,6 @@ func runCachedSandboxAndParse(
 	dynamicFindings, traceHealth, err := parser.ParseStreamWithHealth(logStream, reporter, parser.ParseOptions{
 		KnownRegistryIPs: registryIPs,
 		ProbeExpected:    len(opts.probePackages) > 0 && !opts.skipProbe,
-		RunAsRoot:        opts.runAsRoot,
 	})
 	if err != nil {
 		return nil, "", traceHealth, err

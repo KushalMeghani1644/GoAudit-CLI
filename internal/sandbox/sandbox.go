@@ -23,7 +23,6 @@ import (
 // SandboxOptions controls sandbox security policies.
 type SandboxOptions struct {
 	NetworkEnabled bool
-	RunAsRoot      bool
 }
 
 type Sandbox struct {
@@ -34,7 +33,6 @@ type Sandbox struct {
 	ephemeralImageID string
 	runtime          string
 	networkEnabled   bool
-	runAsRoot        bool
 }
 
 func NewSandbox(ctx context.Context, image string, opts SandboxOptions) (*Sandbox, error) {
@@ -56,7 +54,6 @@ func NewSandbox(ctx context.Context, image string, opts SandboxOptions) (*Sandbo
 		image:          image,
 		runtime:        runtime,
 		networkEnabled: opts.NetworkEnabled,
-		runAsRoot:      opts.RunAsRoot,
 	}, nil
 }
 
@@ -275,33 +272,22 @@ cd /workspace
 ` + workspaceDotEnvScript()
 	}
 
-	// User setup: detect existing uid 1000 (e.g. "node" in node images) or create sandbox user.
-	userSetup := ""
-	execLine := ""
-	if s.runAsRoot {
-		userSetup = `SANDBOX_HOME="/root"
-`
-		execLine = tracedPhaseScript("target", `bash /tmp/target.sh`, targetTimeoutValue)
-	} else {
-		userSetup = `SANDBOX_USER=$(getent passwd 1000 2>/dev/null | cut -d: -f1)
+	// Detect an existing uid 1000 (e.g. "node" in node images) or create the
+	// unprivileged user that always runs target and probe scripts.
+	userSetup := `SANDBOX_USER=$(getent passwd 1000 2>/dev/null | cut -d: -f1)
 if [ -z "$SANDBOX_USER" ]; then
   useradd -m -u 1000 -s /bin/bash sandbox 2>/dev/null || true
   SANDBOX_USER=sandbox
 fi
 SANDBOX_HOME=$(eval echo "~${SANDBOX_USER}")
 `
-		execLine = `chown -R 1000:1000 /workspace 2>/dev/null || true
+	execLine := `chown -R 1000:1000 /workspace 2>/dev/null || true
 ` + tracedPhaseScript("target", `runuser -u "$SANDBOX_USER" -- bash -lc 'cd /workspace && bash /tmp/target.sh'`, targetTimeoutValue)
-	}
 
 	probeLine := ""
 	if strings.TrimSpace(probeScript) != "" {
 		catProbe := scriptHeredoc("/tmp/probe.sh", probeScript, "GOAUDIT_PROBE")
-		if s.runAsRoot {
-			probeLine = catProbe + tracedPhaseScript("probe", `bash /tmp/probe.sh`, probeTimeoutValue)
-		} else {
-			probeLine = catProbe + tracedPhaseScript("probe", `runuser -u "$SANDBOX_USER" -- bash -lc 'cd /workspace && bash /tmp/probe.sh'`, probeTimeoutValue)
-		}
+		probeLine = catProbe + tracedPhaseScript("probe", `runuser -u "$SANDBOX_USER" -- bash -lc 'cd /workspace && bash /tmp/probe.sh'`, probeTimeoutValue)
 	}
 
 	script := fmt.Sprintf(`set -euo pipefail
@@ -451,19 +437,13 @@ func (s *Sandbox) PrepareWarm(ctx context.Context, profileName, img string, requ
 		setupScript += c + "\n"
 	}
 
-	userSetup := ""
-	if s.runAsRoot {
-		userSetup = `SANDBOX_HOME="/root"
-`
-	} else {
-		userSetup = `SANDBOX_USER=$(getent passwd 1000 2>/dev/null | cut -d: -f1)
+	userSetup := `SANDBOX_USER=$(getent passwd 1000 2>/dev/null | cut -d: -f1)
 if [ -z "$SANDBOX_USER" ]; then
   useradd -m -u 1000 -s /bin/bash sandbox 2>/dev/null || true
   SANDBOX_USER=sandbox
 fi
 SANDBOX_HOME=$(eval echo "~${SANDBOX_USER}")
 `
-	}
 
 	prepScript := fmt.Sprintf(`set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -527,7 +507,7 @@ echo "GOAUDIT_WARM_READY" >&2
 // a dedicated home directory that may be recursively wiped between warm cached
 // scans. A misconfigured cacheable image (for example uid 1000 with home / or
 // /root) must never cause the reset to delete top-level system directories or
-// root's home; root runs do not reuse warm caches (see pipeline cache gating).
+// root's home.
 func sandboxHomeGuardScript() string {
 	return `goaudit_home_is_dedicated() {
   case "$(cd "${1:-/goaudit-nonexistent}" 2>/dev/null && pwd)" in
@@ -544,8 +524,6 @@ func sandboxHomeGuardScript() string {
 
 // resetMutableStateScript clears user-writable state left by a prior scan so
 // warm-container reuse does not leak configs, caches, or PATH-controlled files.
-// System binaries under /usr are not restored here; run-as-root scans should not
-// reuse warm caches (see pipeline cache gating).
 func resetMutableStateScript() string {
 	return fmt.Sprintf(`
 # --- goaudit: reset mutable state between cached scans ---
@@ -587,30 +565,16 @@ func (s *Sandbox) ExecScan(ctx context.Context, targetCmd, probeScript, profileN
 	}
 
 	// Resolve sandbox user home, wipe residual state from prior scans, then re-honeypot.
-	userSetup := ""
-	if s.runAsRoot {
-		userSetup = `SANDBOX_HOME="/root"` + "\n"
-	} else {
-		userSetup = `SANDBOX_USER=$(getent passwd 1000 2>/dev/null | cut -d: -f1 || echo sandbox)
+	userSetup := `SANDBOX_USER=$(getent passwd 1000 2>/dev/null | cut -d: -f1 || echo sandbox)
 SANDBOX_HOME=$(eval echo "~${SANDBOX_USER}")` + "\n"
-	}
 
-	execLine := ""
-	if s.runAsRoot {
-		execLine = tracedPhaseScript("target", `bash /tmp/target.sh`, targetTimeoutValue)
-	} else {
-		execLine = `chown -R 1000:1000 /workspace 2>/dev/null || true
+	execLine := `chown -R 1000:1000 /workspace 2>/dev/null || true
 ` + tracedPhaseScript("target", `runuser -u "$SANDBOX_USER" -- bash -lc 'cd /workspace && bash /tmp/target.sh'`, targetTimeoutValue)
-	}
 
 	probeLine := ""
 	if strings.TrimSpace(probeScript) != "" {
 		catProbe := scriptHeredoc("/tmp/probe.sh", probeScript, "GOAUDIT_PROBE")
-		if s.runAsRoot {
-			probeLine = catProbe + tracedPhaseScript("probe", `bash /tmp/probe.sh`, probeTimeoutValue)
-		} else {
-			probeLine = catProbe + tracedPhaseScript("probe", `runuser -u "$SANDBOX_USER" -- bash -lc 'cd /workspace && bash /tmp/probe.sh'`, probeTimeoutValue)
-		}
+		probeLine = catProbe + tracedPhaseScript("probe", `runuser -u "$SANDBOX_USER" -- bash -lc 'cd /workspace && bash /tmp/probe.sh'`, probeTimeoutValue)
 	}
 
 	scanScript := fmt.Sprintf(`set -euo pipefail
