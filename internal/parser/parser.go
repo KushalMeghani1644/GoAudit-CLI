@@ -53,6 +53,8 @@ var (
 	procEnvironRegex = regexp.MustCompile(`(?i)open(?:at)?\(.*?"/proc/self/environ"`)
 )
 
+const packageManagerConfigNPMRC = "/tmp/goaudit-package-manager-config/.npmrc"
+
 // ParseOptions configures the parser for the current scan context.
 type ParseOptions struct {
 	// KnownRegistryIPs maps IP addresses to their registry hostname.
@@ -270,7 +272,10 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 				if failed {
 					continue
 				}
-				if readCriticalPaths.MatchString(path) {
+				// Bun requires its user-level config to be named .npmrc. The
+				// sandbox points it at this known-empty scanner-owned file so
+				// package-manager startup does not consume the live honeypot.
+				if readCriticalPaths.MatchString(path) && path != packageManagerConfigNPMRC {
 					key := "CREDENTIAL_READ:" + path + ":" + phaseTag(probePhase, targetPhase)
 					if !seen[key] {
 						seen[key] = true

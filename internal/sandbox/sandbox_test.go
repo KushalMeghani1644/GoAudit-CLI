@@ -42,6 +42,24 @@ func TestHoneypotScript(t *testing.T) {
 	}
 }
 
+func TestPackageManagerConfigAvoidsLiveNPMRCHoneypot(t *testing.T) {
+	script := packageManagerConfigScript()
+
+	for _, expected := range []string{
+		`NPM_CONFIG_USERCONFIG="${GOAUDIT_PM_CONFIG_DIR}/npm-userconfig"`,
+		`PNPM_CONFIG_USERCONFIG="${GOAUDIT_PM_CONFIG_DIR}/npm-userconfig"`,
+		`XDG_CONFIG_HOME="${GOAUDIT_PM_CONFIG_DIR}"`,
+		`: > "${GOAUDIT_PM_CONFIG_DIR}/.npmrc"`,
+	} {
+		if !strings.Contains(script, expected) {
+			t.Errorf("package-manager config script missing %q", expected)
+		}
+	}
+	if strings.Contains(script, `USERCONFIG="${SANDBOX_HOME}/.npmrc"`) {
+		t.Error("package managers must not use the live .npmrc honeypot as config")
+	}
+}
+
 func TestHoneypotCredentialsAreParseableAndUnmarked(t *testing.T) {
 	if _, err := exec.LookPath("ssh-keygen"); err != nil {
 		t.Fatal("ssh-keygen is required to validate the OpenSSH honeypot key")

@@ -81,6 +81,22 @@ func TestDetectsCredentialReadOpenat2(t *testing.T) {
 	}
 }
 
+func TestIgnoresScannerOwnedPackageManagerNPMRC(t *testing.T) {
+	findings := parse(t, `openat(AT_FDCWD, "/tmp/goaudit-package-manager-config/.npmrc", O_RDONLY|O_CLOEXEC) = 3`)
+	if f := findByReason(findings, "CREDENTIAL_READ"); f != nil {
+		t.Fatal("scanner-owned empty package-manager config must not be treated as credential access")
+	}
+}
+
+func TestStillDetectsLiveNPMRCHoneypotRead(t *testing.T) {
+	f := findByReason(parse(t,
+		`openat(AT_FDCWD, "/home/node/.npmrc", O_RDONLY|O_CLOEXEC) = 3`),
+		"CREDENTIAL_READ")
+	if f == nil {
+		t.Fatal("expected CREDENTIAL_READ for the live .npmrc honeypot")
+	}
+}
+
 func TestDetectsPersistenceWriteBashrc(t *testing.T) {
 	f := findByReason(parse(t,
 		`openat(AT_FDCWD, "/root/.bashrc", O_WRONLY|O_CREAT) = 3`),
