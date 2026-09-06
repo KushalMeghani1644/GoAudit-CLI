@@ -13,7 +13,7 @@ run_fixture() {
 
   output=$(mktemp)
   trap 'rm -f "$output"' RETURN
-  "$CLI" scan "npm install ./$FIXTURES/$fixture" \
+  "$CLI" scan "npm install --userconfig=/dev/null ./$FIXTURES/$fixture" \
     --ci \
     --skip-probe \
     --no-cache \
