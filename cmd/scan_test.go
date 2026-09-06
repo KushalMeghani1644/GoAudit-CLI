@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/KushalMeghani1644/GoAudit-CLI/internal/parser"
-	"github.com/KushalMeghani1644/GoAudit-CLI/internal/report"
 )
 
 func TestInferProfileForPackageManagers(t *testing.T) {
@@ -44,7 +43,7 @@ func TestShouldUsePublishedNodeSandbox(t *testing.T) {
 		t.Fatal("expected custom node image to be preserved")
 	}
 	if shouldUsePublishedNodeSandbox("", scanProfile{Name: "npm", Image: "node:current-slim"}) {
-		t.Fatal("expected runc scan to keep stock node image")
+		t.Fatal("expected an unspecified runtime to keep the stock node image")
 	}
 	if shouldUsePublishedNodeSandbox("runsc", scanProfile{Name: "python", Image: "node:current-slim"}) {
 		t.Fatal("expected non-node profile to keep its image")
@@ -159,65 +158,5 @@ func TestRuntimeTraceUnavailableFindingIncludesMissingReasons(t *testing.T) {
 		if !strings.Contains(f.Evidence, want) {
 			t.Fatalf("expected evidence to contain %q, got %q", want, f.Evidence)
 		}
-	}
-}
-
-func TestRunscTraceFallbackFinding(t *testing.T) {
-	f := runscTraceFallbackFinding(parser.TraceHealth{})
-	if f.ReasonCode != "RUNSC_TRACE_FALLBACK_RUNC" {
-		t.Fatalf("unexpected reason: %s", f.ReasonCode)
-	}
-	if !strings.Contains(f.Evidence, "retried scan using runc") {
-		t.Fatalf("expected runc fallback evidence, got %q", f.Evidence)
-	}
-}
-
-func TestPlanRunscDynamicFallbackPrepFailure(t *testing.T) {
-	plan, ok := planRunscDynamicFallback("runsc", []report.Finding{{ReasonCode: "RUNTIME_PREP_FAILURE"}}, parser.TraceHealth{})
-	if !ok {
-		t.Fatal("expected fallback plan for prep failure")
-	}
-	if plan.Reason != "prep_failed" {
-		t.Fatalf("unexpected plan reason: %s", plan.Reason)
-	}
-	if len(plan.Warnings) != 1 || plan.Warnings[0].ReasonCode != "RUNSC_FALLBACK_RUNC" {
-		t.Fatalf("unexpected warnings: %#v", plan.Warnings)
-	}
-}
-
-func TestPlanRunscDynamicFallbackTraceUnavailable(t *testing.T) {
-	plan, ok := planRunscDynamicFallback("runsc", nil, parser.TraceHealth{})
-	if !ok {
-		t.Fatal("expected fallback plan for unusable trace")
-	}
-	if plan.Reason != "trace_unavailable" {
-		t.Fatalf("unexpected plan reason: %s", plan.Reason)
-	}
-	if len(plan.Warnings) != 2 {
-		t.Fatalf("expected two warnings for trace fallback, got %d", len(plan.Warnings))
-	}
-	if plan.Warnings[0].ReasonCode != "RUNTIME_TRACE_UNAVAILABLE" {
-		t.Fatalf("unexpected first warning: %s", plan.Warnings[0].ReasonCode)
-	}
-	if plan.Warnings[1].ReasonCode != "RUNSC_TRACE_FALLBACK_RUNC" {
-		t.Fatalf("unexpected second warning: %s", plan.Warnings[1].ReasonCode)
-	}
-}
-
-func TestPlanRunscDynamicFallbackSkipsHealthyRunsc(t *testing.T) {
-	plan, ok := planRunscDynamicFallback("runsc", nil, parser.TraceHealth{
-		TargetPhaseObserved:   true,
-		TargetExitObserved:    true,
-		TargetSyscallObserved: true,
-	})
-	if ok {
-		t.Fatalf("did not expect fallback plan for healthy trace: %#v", plan)
-	}
-}
-
-func TestPlanRunscDynamicFallbackSkipsRunc(t *testing.T) {
-	_, ok := planRunscDynamicFallback("runc", nil, parser.TraceHealth{})
-	if ok {
-		t.Fatal("did not expect fallback plan for runc runtime")
 	}
 }

@@ -20,6 +20,8 @@ go install github.com/KushalMeghani1644/GoAudit-CLI/cmd/goaudit@latest
 
 Audit one install or shell command inside a Docker sandbox with strace tracing.
 
+GoAudit requires Docker to have the gVisor `runsc` runtime registered. It refuses to run with Docker's less isolated `runc` runtime.
+
 ```zsh
 goaudit scan "npm install lodash"
 goaudit scan "pnpm add <package>"
@@ -145,8 +147,6 @@ GoAudit caches prepared sandbox containers to speed up repeat scans.
 ```zsh
 goaudit cache status
 goaudit cache clean
-goaudit cache clean --runtime runsc
-goaudit cache clean --runtime runc
 ```
 
 Use `--cache-dir` or `GOAUDIT_CACHE_DIR` to store cache entries elsewhere. Target commands and runtime probes always execute as an unprivileged sandbox user.
@@ -154,11 +154,11 @@ Use `--cache-dir` or `GOAUDIT_CACHE_DIR` to store cache entries elsewhere. Targe
 ## Requirements
 
 - Docker
-- gVisor (recommended)
+- gVisor (`runsc`) registered with Docker (required)
 
 ### gVisor (runsc) on Fedora / SELinux
 
-GoAudit uses gVisor when Docker lists `runsc` in `docker info` runtimes. Installing the `runsc` binary is not enough; it must be registered with Docker:
+GoAudit requires gVisor and exits with code 1 unless Docker lists `runsc` in `docker info` runtimes. Installing the `runsc` binary is not enough; it must be registered with Docker:
 
 ```json
 {
@@ -182,9 +182,9 @@ docker info | rg -i runtimes
 
 **SELinux:** gVisor cannot use Docker's default container SELinux labels. GoAudit sets `--security-opt label=disable` automatically for `runsc` containers.
 
-**Node sandbox image:** when gVisor is available and you keep the default `--node-image`, GoAudit uses `ghcr.io/kushalmeghani1644/goaudit-node-sandbox:latest` for Node-based scans.
+**Node sandbox image:** when you keep the default `--node-image`, GoAudit uses `ghcr.io/kushalmeghani1644/goaudit-node-sandbox:latest` for Node-based scans.
 
-**Fallbacks:** if gVisor is unavailable, or image preparation fails, GoAudit falls back to `runc` and prints a warning.
+GoAudit never falls back to `runc`. If runtime verification or sandbox preparation fails, the scan stops rather than silently weakening isolation.
 
 ## Limitations
 

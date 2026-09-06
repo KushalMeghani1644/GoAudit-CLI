@@ -163,7 +163,6 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 	// --- Cache integration ---
 	var cache *sandbox.CacheManager
 	usedCache := false
-	forcedRuncOffline := false
 	if !noCache {
 		cache, err = sandbox.NewCacheManager(cacheDir)
 		if err != nil && !ciMode {
@@ -184,11 +183,8 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 			}
 		}
 		if cached != nil {
-			refresh, offline := cache.ShouldRefreshLatest(ctx, cached)
+			refresh, _ := cache.ShouldRefreshLatest(ctx, cached)
 			if refresh {
-				if offline && cached.Runtime == "runsc" && isNodeProfile(profile.Name) {
-					forcedRuncOffline = true
-				}
 				cache.Invalidate(ctx, cached.Runtime, profile.Name, cached.Network)
 				cached = nil
 			}
@@ -198,11 +194,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 				reporter.UpdateProgress("Using cached sandbox...")
 				s.SetContainerID(cached.ContainerID)
 				s.SetImage(cached.Image)
-				if cached.Runtime == "runsc" {
-					s.SetRuntime("runsc")
-				} else {
-					s.SetRuntime("")
-				}
+				s.SetRuntime(cached.Runtime)
 				cache.TouchLastUsed(cached.Runtime, profile.Name, cached.Network)
 				usedCache = true
 				// Update profile image to match the cached one.
@@ -214,83 +206,11 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 		}
 	}
 
-	imageFallbackToRunc := false
-
 	if !usedCache {
-		if forcedRuncOffline && s.Runtime() == "runsc" && isNodeProfile(profile.Name) && profile.Image == sandbox.NodeSandboxImage {
-			imageFallbackToRunc = true
-			fallback := report.Finding{
-				Severity:   report.SeverityWarning,
-				Type:       "runtime",
-				ReasonCode: "RUNSC_FALLBACK_RUNC",
-				Path:       "sandbox",
-				Confidence: 85,
-				Evidence:   "No internet available, falling back to runc",
-			}
-			findings = append(findings, fallback)
-			reporter.PrintLiveFinding(fallback)
-			if !ciMode {
-				reporter.StopProgress()
-				fmt.Printf("\033[33m[WARNING] No internet available, falling back to runc.\033[0m\r\n")
-				reporter.StartProgress("Retrying with runc...")
-			}
-			s.SetRuntime("")
-			profile.Image = defaultImageForProfile(profile.Name)
-			s.SetImage(profile.Image)
-		}
 		if _, err := s.EnsureImage(ctx); err != nil {
-			if s.Runtime() == "runsc" && isNodeProfile(profile.Name) && profile.Image == sandbox.NodeSandboxImage {
-				imageFallbackToRunc = true
-				fallback := report.Finding{
-					Severity:   report.SeverityWarning,
-					Type:       "runtime",
-					ReasonCode: "RUNSC_FALLBACK_RUNC",
-					Path:       "sandbox",
-					Confidence: 85,
-					Evidence:   fmt.Sprintf("could not prepare gVisor sandbox image %s; no internet available, falling back to runc: %v", sandbox.NodeSandboxImage, err),
-				}
-				findings = append(findings, fallback)
-				reporter.PrintLiveFinding(fallback)
-				if !ciMode {
-					reporter.StopProgress()
-					fmt.Printf("\033[33m[WARNING] Could not prepare gVisor sandbox image %s. No internet available, falling back to runc.\033[0m\r\n", sandbox.NodeSandboxImage)
-					reporter.StartProgress("Retrying with runc...")
-				}
-				s.SetRuntime("")
-				profile.Image = defaultImageForProfile(profile.Name)
-				s.SetImage(profile.Image)
-				reporter.UpdateProgress(fmt.Sprintf("Preparing sandbox image %s...", profile.Image))
-
-				// Check runc cache before pulling again.
-				if cache != nil && opts.projectPath == "" {
-					runcCached := cache.Lookup(ctx, "", profile.Name, networkEnabled)
-					if runcCached != nil && runcCached.Image == profile.Image && !cache.ImageChanged(ctx, runcCached.Image, runcCached.ImageDigest) {
-						reporter.UpdateProgress("Using cached runc sandbox...")
-						s.SetContainerID(runcCached.ContainerID)
-						s.SetImage(runcCached.Image)
-						profile.Image = runcCached.Image
-						cache.TouchLastUsed("", profile.Name, runcCached.Network)
-						usedCache = true
-					}
-				}
-
-				if !usedCache {
-					if _, err := s.EnsureImage(ctx); err != nil {
-						reporter.StopProgress()
-						return false, fmt.Errorf("failed to prepare image after runc fallback: %w", err)
-					}
-				}
-			} else {
-				reporter.StopProgress()
-				return false, fmt.Errorf("failed to prepare image: %w", err)
-			}
+			reporter.StopProgress()
+			return false, fmt.Errorf("failed to prepare image: %w", err)
 		}
-	}
-
-	if s.Runtime() != "runsc" && !ciMode && !imageFallbackToRunc {
-		reporter.StopProgress()
-		fmt.Print("\033[33m[WARNING] gVisor (runsc) is not registered in Docker (see docker info Runtimes). Using default runtime (runc).\033[0m\r\n")
-		reporter.StartProgress("Running in sandbox...")
 	}
 
 	reporter.UpdateProgress(fmt.Sprintf("Running %s in sandbox...", profile.Name))
@@ -337,56 +257,6 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 		}
 	}
 
-	fallbackPlan, needsRuncFallback := planRunscDynamicFallback(sandboxRuntime, dynamicFindings, traceHealth)
-	if needsRuncFallback {
-		s.Cleanup(ctx, false)
-		for _, fallbackFinding := range fallbackPlan.Warnings {
-			findings = append(findings, fallbackFinding)
-			reporter.PrintLiveFinding(fallbackFinding)
-		}
-		if !ciMode {
-			reporter.StopProgress()
-			fmt.Print(runscFallbackWarningMessage(fallbackPlan.Reason))
-			reporter.StartProgress("Retrying with runc...")
-		}
-
-		s.SetRuntime("")
-		if isNodeProfile(profile.Name) && profile.Image == sandbox.NodeSandboxImage {
-			profile.Image = defaultImageForProfile(profile.Name)
-			s.SetImage(profile.Image)
-		}
-
-		usedRuncCache := false
-		if cache != nil && opts.projectPath == "" {
-			runcCached := cache.Lookup(ctx, "", profile.Name, networkEnabled)
-			if runcCached != nil && runcCached.Image == profile.Image && !cache.ImageChanged(ctx, runcCached.Image, runcCached.ImageDigest) {
-				reporter.UpdateProgress("Using cached runc sandbox...")
-				s.SetContainerID(runcCached.ContainerID)
-				s.SetImage(runcCached.Image)
-				profile.Image = runcCached.Image
-				cache.TouchLastUsed("", profile.Name, networkEnabled)
-				usedRuncCache = true
-			}
-		}
-		if usedRuncCache {
-			dynamicFindings, sandboxRuntime, traceHealth, err = runCachedSandboxAndParse(ctx, s, profile, runTargetCmd, probeScript, opts, registryIPs, reporter)
-			usedCache = true
-		} else {
-			if _, err := s.EnsureImage(ctx); err != nil {
-				s.Cleanup(ctx, false)
-				reporter.StopProgress()
-				return false, fmt.Errorf("failed to prepare image after runc fallback: %w", err)
-			}
-			dynamicFindings, sandboxRuntime, traceHealth, err = runSandboxAndParse(ctx, s, profile, runTargetCmd, probeScript, opts, registryIPs, reporter)
-			usedCache = false
-		}
-		if err != nil {
-			s.Cleanup(ctx, false)
-			reporter.StopProgress()
-			return false, fmt.Errorf("failed to run command after runc fallback: %w", err)
-		}
-	}
-
 	if !traceHealth.Usable() {
 		traceWarning := runtimeTraceUnavailableFinding(traceHealth, sandboxRuntime)
 		findings = append(findings, traceWarning)
@@ -424,10 +294,6 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 
 	// Cleanup the scan container (not the cached warm container).
 	s.Cleanup(ctx, usedCache)
-
-	if sandboxRuntime == "" {
-		sandboxRuntime = "runc"
-	}
 
 	meta := report.ReportMeta{
 		Command:                  targetCmd,
@@ -503,29 +369,15 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 	}
 
 	if cached := cache.Lookup(ctx, s.Runtime(), profile.Name, networkEnabled); cached != nil {
-		refresh, offline := cache.ShouldRefreshLatest(ctx, cached)
+		refresh, _ := cache.ShouldRefreshLatest(ctx, cached)
 		if refresh {
 			cache.Invalidate(ctx, cached.Runtime, profile.Name, cached.Network)
 			cached = nil
-			if offline && s.Runtime() == "runsc" && isNodeProfile(profile.Name) {
-				if !ciMode {
-					reporter.StopProgress()
-					fmt.Printf("\033[33m[WARNING] No internet available, falling back to runc.\033[0m\r\n")
-					reporter.StartProgress("Preparing runc sandbox cache...")
-				}
-				s.SetRuntime("")
-				profile.Image = defaultImageForProfile(profile.Name)
-				s.SetImage(profile.Image)
-			}
 		}
 		if cached != nil && cached.Image == profile.Image && !cache.ImageChanged(ctx, cached.Image, cached.ImageDigest) {
 			reporter.StopProgress()
 			if !ciMode {
-				rt := cached.Runtime
-				if rt == "" {
-					rt = "runc"
-				}
-				fmt.Printf("Sandbox cache is already warm for %s (%s).\n", profile.Name, rt)
+				fmt.Printf("Sandbox cache is already warm for %s (%s).\n", profile.Name, cached.Runtime)
 			}
 			return nil
 		}
@@ -533,30 +385,8 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 
 	reporter.UpdateProgress(fmt.Sprintf("Preparing sandbox image %s...", profile.Image))
 	if _, err := s.EnsureImage(ctx); err != nil {
-		if s.Runtime() == "runsc" && isNodeProfile(profile.Name) && profile.Image == sandbox.NodeSandboxImage {
-			if !ciMode {
-				reporter.StopProgress()
-				fmt.Printf("\033[33m[WARNING] Could not prepare gVisor sandbox image %s. No internet available, falling back to runc.\033[0m\r\n", sandbox.NodeSandboxImage)
-				reporter.StartProgress("Preparing runc sandbox cache...")
-			}
-			s.SetRuntime("")
-			profile.Image = defaultImageForProfile(profile.Name)
-			s.SetImage(profile.Image)
-			if cached := cache.Lookup(ctx, "", profile.Name, networkEnabled); cached != nil && cached.Image == profile.Image && !cache.ImageChanged(ctx, cached.Image, cached.ImageDigest) {
-				reporter.StopProgress()
-				if !ciMode {
-					fmt.Printf("Sandbox cache is already warm for %s (runc).\n", profile.Name)
-				}
-				return nil
-			}
-			if _, err := s.EnsureImage(ctx); err != nil {
-				reporter.StopProgress()
-				return fmt.Errorf("failed to prepare image after runc fallback: %w", err)
-			}
-		} else {
-			reporter.StopProgress()
-			return fmt.Errorf("failed to prepare image: %w", err)
-		}
+		reporter.StopProgress()
+		return fmt.Errorf("failed to prepare image: %w", err)
 	}
 
 	reporter.UpdateProgress("Warming sandbox cache...")
@@ -577,11 +407,7 @@ func warmSandboxCache(ctx context.Context, profile scanProfile, reporter *report
 
 	reporter.StopProgress()
 	if !ciMode {
-		rt := s.Runtime()
-		if rt == "" {
-			rt = "runc"
-		}
-		fmt.Printf("Warmed sandbox cache for %s (%s).\n", profile.Name, rt)
+		fmt.Printf("Warmed sandbox cache for %s (%s).\n", profile.Name, s.Runtime())
 	}
 	return nil
 }
@@ -619,11 +445,7 @@ func runSandboxAndParse(
 		return nil, "", traceHealth, err
 	}
 
-	runtime := s.Runtime()
-	if runtime == "" {
-		runtime = "runc"
-	}
-	return dynamicFindings, runtime, traceHealth, nil
+	return dynamicFindings, s.Runtime(), traceHealth, nil
 }
 
 // runCachedSandboxAndParse runs a scan on a cached (warm) container via ExecScan.
@@ -654,17 +476,10 @@ func runCachedSandboxAndParse(
 		return nil, "", traceHealth, err
 	}
 
-	runtime := s.Runtime()
-	if runtime == "" {
-		runtime = "runc"
-	}
-	return dynamicFindings, runtime, traceHealth, nil
+	return dynamicFindings, s.Runtime(), traceHealth, nil
 }
 
 func runtimeTraceUnavailableFinding(health parser.TraceHealth, runtime string) report.Finding {
-	if runtime == "" {
-		runtime = "runc"
-	}
 	return report.Finding{
 		Severity:   report.SeverityWarning,
 		Type:       "runtime",
@@ -673,58 +488,6 @@ func runtimeTraceUnavailableFinding(health parser.TraceHealth, runtime string) r
 		Confidence: 90,
 		Evidence:   fmt.Sprintf("%s runtime trace incomplete: %s", runtime, strings.Join(traceHealthMissingReasons(health), ", ")),
 	}
-}
-
-func runscTraceFallbackFinding(health parser.TraceHealth) report.Finding {
-	return report.Finding{
-		Severity:   report.SeverityWarning,
-		Type:       "runtime",
-		ReasonCode: "RUNSC_TRACE_FALLBACK_RUNC",
-		Path:       "sandbox",
-		Confidence: 85,
-		Evidence:   fmt.Sprintf("gVisor runtime trace unavailable; retried scan using runc: %s", strings.Join(traceHealthMissingReasons(health), ", ")),
-	}
-}
-
-type runscDynamicFallbackPlan struct {
-	Reason   string
-	Warnings []report.Finding
-}
-
-func planRunscDynamicFallback(runtime string, dynamicFindings []report.Finding, traceHealth parser.TraceHealth) (runscDynamicFallbackPlan, bool) {
-	if runtime != "runsc" {
-		return runscDynamicFallbackPlan{}, false
-	}
-	if parser.HasPrepFailure(dynamicFindings) {
-		return runscDynamicFallbackPlan{
-			Reason: "prep_failed",
-			Warnings: []report.Finding{{
-				Severity:   report.SeverityWarning,
-				Type:       "runtime",
-				ReasonCode: "RUNSC_FALLBACK_RUNC",
-				Path:       "sandbox",
-				Confidence: 85,
-				Evidence:   "gVisor prep failed; retried scan using runc",
-			}},
-		}, true
-	}
-	if !traceHealth.Usable() {
-		return runscDynamicFallbackPlan{
-			Reason: "trace_unavailable",
-			Warnings: []report.Finding{
-				runtimeTraceUnavailableFinding(traceHealth, "runsc"),
-				runscTraceFallbackFinding(traceHealth),
-			},
-		}, true
-	}
-	return runscDynamicFallbackPlan{}, false
-}
-
-func runscFallbackWarningMessage(reason string) string {
-	if reason == "prep_failed" {
-		return "\033[33m[WARNING] gVisor sandbox prep failed (tools/apt). Retrying with runc; npm install behavior is still scanned.\033[0m\r\n"
-	}
-	return "\033[33m[WARNING] gVisor runtime tracing was unavailable. Retrying with runc; weaker isolation will be noted in the report.\033[0m\r\n"
 }
 
 func traceHealthMissingReasons(health parser.TraceHealth) []string {
@@ -790,14 +553,6 @@ func shouldUsePublishedNodeSandbox(runtime string, profile scanProfile) bool {
 		return false
 	}
 	return profile.Image == sandbox.DefaultNodeImage || profile.Image == sandbox.DefaultBunImage
-}
-
-// defaultImageForProfile returns the stock runc fallback image for the given profile.
-func defaultImageForProfile(profileName string) string {
-	if profileName == "bun" {
-		return sandbox.DefaultBunImage
-	}
-	return sandbox.DefaultNodeImage
 }
 
 func defaultTargetTimeout(profileName string) string {

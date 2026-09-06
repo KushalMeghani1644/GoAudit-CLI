@@ -47,7 +47,11 @@ func NewSandbox(ctx context.Context, image string, opts SandboxOptions) (*Sandbo
 		)
 	}
 
-	runtime := detectRuntime(ctx, cli)
+	runtime, err := detectRuntime(ctx, cli)
+	if err != nil {
+		cli.Close()
+		return nil, err
+	}
 
 	return &Sandbox{
 		cli:            cli,
