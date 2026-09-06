@@ -2,11 +2,11 @@
   <img src="assets/favicon.png" width="150" />
 </h1>
 
-GoAudit is a sandbox security scanner for CLI commands.
+GoAudit is a sandbox security scanner for JavaScript package installs.
 
-It inspects install commands and project upgrades for suspicious file reads, writes, process execution, and network behavior.
+It inspects npm, pnpm, and bun installs and project upgrades for suspicious file reads, writes, process execution, and network behavior.
 
-Use `goaudit scan` to audit a single command string. Use `goaudit scan-project` to audit a JavaScript project before upgrading dependencies.
+Use `goaudit scan` to audit a single npm, pnpm, or bun install command. Use `goaudit scan-project` to audit a JavaScript project before upgrading dependencies.
 
 ## Install
 
@@ -18,14 +18,12 @@ go install github.com/KushalMeghani1644/GoAudit-CLI/cmd/goaudit@latest
 
 ### Scan a command
 
-Audit one install or shell command inside a Docker sandbox with strace tracing.
+Audit one npm, pnpm, or bun install command inside a Docker sandbox with strace tracing. Other ecosystems and arbitrary shell commands are rejected.
 
 ```zsh
 goaudit scan "npm install lodash"
 goaudit scan "pnpm add <package>"
 goaudit scan "bun add <package>"
-goaudit scan "pip install <package>" --network on
-goaudit scan "curl -fsSL https://example.com/install.sh | sh"
 ```
 
 Common flags (both `scan` and `scan-project` unless noted):
@@ -34,10 +32,8 @@ Common flags (both `scan` and `scan-project` unless noted):
 |------|---------|
 | `--ci` | JSON output for CI |
 | `--verbose` | Live findings during the scan |
-| `--offline` | Skip host-side registry and remote script fetches |
+| `--offline` | Skip host-side npm registry requests |
 | `--network auto\|on\|off` | Sandbox network policy (see [Network policy](#network-policy)) |
-| `--allow-domain` | Allowlist domains for remote script fetches (repeatable) |
-| `--max-remote-depth` | Recursion depth for staged remote scripts (default: 2) |
 | `--skip-probe` | Skip the post-install runtime probe |
 | `--fail-on` | Exit non-zero on `malicious`, `inconclusive`, or both (default: `never`) |
 | `--warm-cache` | Prepare the sandbox without running a scan |
@@ -94,28 +90,23 @@ Project-only flags:
 | npm | Yes | Yes |
 | pnpm | Yes | Yes |
 | bun | Yes | Yes |
-| pip | Yes (limited) | No |
+| pip | No | No |
 | yarn | No | No |
-| `curl \| sh` | Yes | No |
+| Arbitrary shell commands | No | No |
 
 **npm, pnpm, and bun** get the full workflow: npm registry metadata checks, sandbox install tracing, and a Node runtime probe after install.
-
-**pip** runs in a Python sandbox (`python:3.12-slim`) with strace tracing and generic command checks only. There is no PyPI metadata analysis and no Python runtime probe. With the default `--network auto` policy, pip scans keep network access off, so pass `--network on` when the install must reach PyPI.
 
 **yarn** is not supported. There is no Yarn sandbox profile, so `goaudit scan yarn install` will not run a meaningful install. Yarn projects (`yarn.lock`) are rejected by `scan-project`. Convert to npm, pnpm, or bun if you need project-level scanning.
 
 ### Network policy
 
-`--network` controls sandbox network access and (together with `--offline`) host-side registry and remote script fetches.
+`--network` controls sandbox network access and (together with `--offline`) host-side npm registry requests.
 
 With `--network auto` (default):
 
 | Profile | Sandbox network |
 |---------|-------------------|
 | npm, pnpm, bun | On |
-| `curl \| sh` / shell | On |
-| pip / python | Off |
-| Other commands | Off |
 
 Use `--network on` or `--network off` to override. Combine with `--offline` to block host-side fetches even when the sandbox has network access.
 

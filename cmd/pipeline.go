@@ -50,7 +50,7 @@ func resolveRegistryIPs(profileName string) map[string]string {
 func networkEnabledForProfile(profileName string, allowNetwork bool) bool {
 	if networkMode == "auto" {
 		switch profileName {
-		case "npm", "pnpm", "bun", "shell":
+		case "npm", "pnpm", "bun":
 			return true
 		default:
 			return false
@@ -107,29 +107,6 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 					findings = append(findings, f)
 					reporter.PrintLiveFinding(f)
 				}
-			}
-		}
-	}
-
-	if urls := analyzer.ExtractURLs(targetCmd); len(urls) > 0 && !opts.skipStatic {
-		if !hostStaticNetwork {
-			evidence := "Offline mode disabled remote script retrieval"
-			if offlineMode && !networkEnabled {
-				evidence = "Offline mode and network policy disabled remote script retrieval on the host"
-			} else if !offlineMode && !networkEnabled {
-				evidence = "Network policy disabled remote script retrieval on the host"
-			}
-			f := report.Finding{
-				Severity: report.SeverityWarning, Type: "policy", ReasonCode: "INCONCLUSIVE_REMOTE_FETCH",
-				Path: strings.Join(urls, ","), Confidence: 35, Evidence: evidence,
-			}
-			findings = append(findings, f)
-			reporter.PrintLiveFinding(f)
-		} else {
-			scriptFindings := analyzer.AnalyzeRemoteScriptsWithPolicy(urls, maxRemoteDepth, allowedDomains)
-			findings = append(findings, scriptFindings...)
-			for _, f := range scriptFindings {
-				reporter.PrintLiveFinding(f)
 			}
 		}
 	}
@@ -801,14 +778,7 @@ func defaultImageForProfile(profileName string) string {
 }
 
 func defaultTargetTimeout(profileName string) string {
-	switch profileName {
-	case "npm", "pnpm", "bun":
-		return "180s"
-	case "shell":
-		return "120s"
-	default:
-		return "120s"
-	}
+	return "180s"
 }
 
 func probeTimeoutSeconds(timeoutValue string) int {
