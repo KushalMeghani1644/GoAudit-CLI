@@ -69,6 +69,19 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install and register gVisor
+        run: |
+          arch="$(dpkg --print-architecture)"
+          curl -fsSL https://gvisor.dev/archive.key |
+            sudo gpg --dearmor --yes -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+          echo "deb [arch=${arch} signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" |
+            sudo tee /etc/apt/sources.list.d/gvisor.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install --yes runsc
+          sudo runsc install
+          sudo systemctl restart docker
+          docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'
+
       - name: Build node sandbox image
         run: docker build --pull -t goaudit-node-sandbox:ci -f docker/Dockerfile.node-sandbox .
 
