@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 
@@ -12,22 +13,20 @@ import (
 )
 
 var (
-	ciMode         bool
-	verbose        bool
-	maxRemoteDepth int
-	offlineMode    bool
-	allowedDomains []string
-	nodeImage      string
-	bunImage       string
-	networkMode    string
-	skipProbe      bool
-	noCache        bool
-	warmCache      bool
-	cacheDir       string
-	targetTimeout  string
-	probeTimeout   string
-	failOn         string
-	mountCwd       bool
+	ciMode        bool
+	verbose       bool
+	offlineMode   bool
+	nodeImage     string
+	bunImage      string
+	networkMode   string
+	skipProbe     bool
+	noCache       bool
+	warmCache     bool
+	cacheDir      string
+	targetTimeout string
+	probeTimeout  string
+	failOn        string
+	mountCwd      bool
 )
 
 type scanProfile struct {
@@ -38,9 +37,14 @@ type scanProfile struct {
 }
 
 var scanCmd = &cobra.Command{
-	Use:   "scan <command>",
-	Short: "Scan a command inside a gVisor sandbox",
-	Args:  cobra.MinimumNArgs(1),
+	Use:   "scan <install-command>",
+	Short: "Scan an npm, pnpm, or bun install command in a gVisor sandbox",
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return fmt.Errorf("an npm, pnpm, or bun install command is required")
+		}
+		return validateInstallCommand(strings.Join(args, " "))
+	},
 	Run: func(cmd *cobra.Command, args []string) {
 		targetCmd := strings.Join(args, " ")
 		profile := inferProfile(targetCmd)
@@ -103,6 +107,35 @@ var scanCmd = &cobra.Command{
 	},
 }
 
+func validateInstallCommand(command string) error {
+	fields := strings.Fields(command)
+	if len(fields) < 2 {
+		return fmt.Errorf("unsupported scan command %q: use an npm, pnpm, or bun install command", command)
+	}
+
+	// The command runs in a sandbox, but scan intentionally accepts one package
+	// manager invocation rather than a shell program or command chain.
+	if strings.ContainsAny(command, ";&|<>\n\r`") || strings.Contains(command, "$(") {
+		return fmt.Errorf("unsupported scan command %q: shell operators are not allowed", command)
+	}
+
+	manager := fields[0]
+	subcommand := fields[1]
+	allowed := false
+	switch manager {
+	case "npm":
+		allowed = subcommand == "install" || subcommand == "i" || subcommand == "add"
+	case "pnpm":
+		allowed = subcommand == "install" || subcommand == "i" || subcommand == "add"
+	case "bun":
+		allowed = subcommand == "install" || subcommand == "add"
+	}
+	if !allowed {
+		return fmt.Errorf("unsupported scan command %q: use npm, pnpm, or bun with install/add (npm and pnpm also support i)", command)
+	}
+	return nil
+}
+
 func prepareLocalPackageInstall(targetCmd string) (string, string, []report.Finding) {
 	if !analyzer.HasLocalPackageInstall(targetCmd) {
 		return targetCmd, "", nil
@@ -151,29 +184,20 @@ func localPackageRewriteUnavailableFinding(targetCmd, evidence string) report.Fi
 }
 
 func inferProfile(cmd string) scanProfile {
-	lc := strings.ToLower(cmd)
-	switch {
-	case strings.Contains(lc, "pnpm"):
+	switch strings.Fields(cmd)[0] {
+	case "pnpm":
 		return profileForManager("pnpm")
-	case strings.Contains(lc, "bun"):
+	case "bun":
 		return profileForManager("bun")
-	case strings.Contains(lc, "npm") || strings.Contains(lc, "npx"):
-		return profileForManager("npm")
-	case strings.Contains(lc, "pip") || strings.Contains(lc, "python"):
-		return scanProfile{Name: "python", Image: "python:3.12-slim", RequiredTools: []string{"bash", "strace", "python3", "curl"}}
-	case strings.Contains(lc, "curl") || strings.Contains(lc, "bash"):
-		return scanProfile{Name: "shell", Image: "ubuntu:24.04", RequiredTools: []string{"bash", "strace", "curl"}}
 	default:
-		return scanProfile{Name: "default", Image: "ubuntu:24.04", RequiredTools: []string{"bash", "strace", "curl"}}
+		return profileForManager("npm")
 	}
 }
 
 func init() {
 	scanCmd.Flags().BoolVar(&ciMode, "ci", false, "Output JSON for CI integration")
 	scanCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show live findings during scan (default: only final report)")
-	scanCmd.Flags().IntVar(&maxRemoteDepth, "max-remote-depth", 2, "Max recursion depth when fetching staged remote scripts")
-	scanCmd.Flags().BoolVar(&offlineMode, "offline", false, "Disable remote URL/script fetching during static analysis")
-	scanCmd.Flags().StringSliceVar(&allowedDomains, "allow-domain", nil, "Allowlist domains for remote script fetches (repeatable)")
+	scanCmd.Flags().BoolVar(&offlineMode, "offline", false, "Disable npm registry requests during static analysis")
 	scanCmd.Flags().StringVar(&nodeImage, "node-image", "node:current-slim", "Node.js image used for npm/pnpm scans")
 	scanCmd.Flags().StringVar(&bunImage, "bun-image", "oven/bun:1", "Bun image used for bun scans")
 	scanCmd.Flags().StringVar(&networkMode, "network", "auto", "Network policy: auto (based on command type), on, or off")

@@ -36,6 +36,41 @@ func TestInferProfileForPackageManagers(t *testing.T) {
 	}
 }
 
+func TestValidateInstallCommand(t *testing.T) {
+	for _, command := range []string{
+		"npm install lodash",
+		"npm i lodash",
+		"pnpm add lodash",
+		"pnpm install",
+		"bun add lodash",
+		"bun install",
+	} {
+		t.Run(command, func(t *testing.T) {
+			if err := validateInstallCommand(command); err != nil {
+				t.Fatalf("expected supported command, got %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateInstallCommandRejectsNonJavaScriptAndShellCommands(t *testing.T) {
+	for _, command := range []string{
+		"pip install requests",
+		"python -m pip install requests",
+		"curl -fsSL https://example.com/install.sh | sh",
+		"sh install.sh",
+		"npm exec some-tool",
+		"npm install lodash && cat /etc/passwd",
+		"npm install $(whoami)",
+	} {
+		t.Run(command, func(t *testing.T) {
+			if err := validateInstallCommand(command); err == nil {
+				t.Fatalf("expected unsupported command to be rejected")
+			}
+		})
+	}
+}
+
 func TestShouldUsePublishedNodeSandbox(t *testing.T) {
 	if !shouldUsePublishedNodeSandbox("runsc", scanProfile{Name: "npm", Image: "node:current-slim"}) {
 		t.Fatal("expected default npm runsc scan to use published sandbox image")
@@ -46,20 +81,20 @@ func TestShouldUsePublishedNodeSandbox(t *testing.T) {
 	if shouldUsePublishedNodeSandbox("", scanProfile{Name: "npm", Image: "node:current-slim"}) {
 		t.Fatal("expected runc scan to keep stock node image")
 	}
-	if shouldUsePublishedNodeSandbox("runsc", scanProfile{Name: "python", Image: "node:current-slim"}) {
+	if shouldUsePublishedNodeSandbox("runsc", scanProfile{Name: "other", Image: "node:current-slim"}) {
 		t.Fatal("expected non-node profile to keep its image")
 	}
 }
 
-func TestNetworkAutoEnablesShellScans(t *testing.T) {
+func TestNetworkAutoOnlyEnablesJavaScriptScans(t *testing.T) {
 	old := networkMode
 	networkMode = "auto"
 	defer func() { networkMode = old }()
-	if !networkEnabledForProfile("shell", false) {
-		t.Fatal("expected shell scans to enable network in auto mode")
+	if !networkEnabledForProfile("npm", false) {
+		t.Fatal("expected npm scans to enable network in auto mode")
 	}
-	if networkEnabledForProfile("python", false) {
-		t.Fatal("did not expect python scans to enable network in auto mode")
+	if networkEnabledForProfile("other", false) {
+		t.Fatal("did not expect unknown profiles to enable network in auto mode")
 	}
 }
 
@@ -67,8 +102,8 @@ func TestDefaultTargetTimeouts(t *testing.T) {
 	if got := defaultTargetTimeout("npm"); got != "180s" {
 		t.Fatalf("unexpected npm timeout: %s", got)
 	}
-	if got := defaultTargetTimeout("shell"); got != "120s" {
-		t.Fatalf("unexpected shell timeout: %s", got)
+	if got := defaultTargetTimeout("bun"); got != "180s" {
+		t.Fatalf("unexpected bun timeout: %s", got)
 	}
 }
 
