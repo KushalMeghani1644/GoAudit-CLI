@@ -9,8 +9,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var cacheRuntimeFilter string
-
 var cacheCmd = &cobra.Command{
 	Use:   "cache",
 	Short: "Manage sandbox cache",
@@ -65,23 +63,13 @@ var cacheCleanCmd = &cobra.Command{
 		}
 		defer cache.Close()
 
-		if cacheRuntimeFilter != "" {
-			rt := cacheRuntimeFilter
-			if rt == "runc" {
-				rt = ""
-			}
-			cache.InvalidateByRuntime(ctx, rt)
-			fmt.Printf("Removed all %s cached sandboxes.\n", cacheRuntimeFilter)
-		} else {
-			cache.InvalidateAll(ctx)
-			fmt.Println("Removed all cached sandboxes.")
-		}
+		cache.InvalidateAll(ctx)
+		fmt.Println("Removed all cached sandboxes.")
 	},
 }
 
 func init() {
 	cacheCmd.PersistentFlags().StringVar(&cacheDir, "cache-dir", "", "Custom directory for sandbox cache (or set GOAUDIT_CACHE_DIR)")
-	cacheCleanCmd.Flags().StringVar(&cacheRuntimeFilter, "runtime", "", "Only remove caches for this runtime (runsc or runc)")
 	cacheCmd.AddCommand(cacheStatusCmd)
 	cacheCmd.AddCommand(cacheCleanCmd)
 	rootCmd.AddCommand(cacheCmd)
