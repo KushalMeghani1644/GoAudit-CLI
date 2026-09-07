@@ -9,7 +9,7 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:   "goaudit",
-	Short: "GoAudit is a sandbox security scanner for CLI commands",
+	Short: "GoAudit is a sandbox security scanner for JavaScript package installs",
 }
 
 func Execute() {
