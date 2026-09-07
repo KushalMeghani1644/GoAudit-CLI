@@ -190,9 +190,7 @@ func extractFindingPackageName(path string) string {
 func init() {
 	scanProjectCmd.Flags().BoolVar(&ciMode, "ci", false, "Output JSON for CI integration")
 	scanProjectCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show live findings during scan")
-	scanProjectCmd.Flags().IntVar(&maxRemoteDepth, "max-remote-depth", 2, "Max recursion depth when fetching staged remote scripts")
-	scanProjectCmd.Flags().BoolVar(&offlineMode, "offline", false, "Disable remote URL/script fetching during static analysis")
-	scanProjectCmd.Flags().StringSliceVar(&allowedDomains, "allow-domain", nil, "Allowlist domains for remote script fetches (repeatable)")
+	scanProjectCmd.Flags().BoolVar(&offlineMode, "offline", false, "Disable npm registry requests during static analysis")
 	scanProjectCmd.Flags().StringVar(&nodeImage, "node-image", "node:current-slim", "Node.js image used for npm/pnpm scans")
 	scanProjectCmd.Flags().StringVar(&bunImage, "bun-image", "oven/bun:1", "Bun image used for bun scans")
 	scanProjectCmd.Flags().StringVar(&networkMode, "network", "auto", "Network policy: auto (based on command type), on, or off")
