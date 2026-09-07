@@ -56,7 +56,7 @@ func TestPackageManagerConfigAvoidsLiveNPMRCHoneypot(t *testing.T) {
 			t.Errorf("package-manager config script missing %q", expected)
 		}
 	}
-	if strings.Contains(script, `USERCONFIG="${SANDBOX_HOME}/.npmrc"`) {
+	if strings.Contains(script, `${SANDBOX_HOME}/.npmrc`) {
 		t.Error("package managers must not use the live .npmrc honeypot as config")
 	}
 }
