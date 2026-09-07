@@ -47,6 +47,7 @@ func TestPackageManagerConfigAvoidsLiveNPMRCHoneypot(t *testing.T) {
 
 	for _, expected := range []string{
 		`NPM_CONFIG_USERCONFIG="${GOAUDIT_PM_CONFIG_DIR}/npm-userconfig"`,
+		`npm_config_userconfig="${GOAUDIT_PM_CONFIG_DIR}/npm-userconfig"`,
 		`PNPM_CONFIG_USERCONFIG="${GOAUDIT_PM_CONFIG_DIR}/npm-userconfig"`,
 		`XDG_CONFIG_HOME="${GOAUDIT_PM_CONFIG_DIR}"`,
 		`: > "${GOAUDIT_PM_CONFIG_DIR}/.npmrc"`,

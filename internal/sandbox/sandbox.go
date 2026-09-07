@@ -293,6 +293,7 @@ SANDBOX_HOME=$(eval echo "~${SANDBOX_USER}")
 	script := fmt.Sprintf(`set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 %s
+%s
 
 %s
 %s
@@ -317,8 +318,8 @@ done
 	if [ "${GOAUDIT_TARGET_RC:-0}" -ne 0 ]; then
   exit 99
 fi
-	`, prepScriptForRuntime(s.runtime), setupScript, toolsCheck, profileName, image,
-		userSetup, honeypotScript()+packageManagerConfigScript(), projectStage, scriptHeredoc("/tmp/target.sh", targetCmd, "GOAUDIT_TARGET"), execLine, probeLine)
+	`, prepScriptForRuntime(s.runtime), packageManagerConfigScript(), setupScript, toolsCheck, profileName, image,
+		userSetup, honeypotScript(), projectStage, scriptHeredoc("/tmp/target.sh", targetCmd, "GOAUDIT_TARGET"), execLine, probeLine)
 
 	pidsLimit := int64(256)
 	hostConfig := &container.HostConfig{
@@ -448,6 +449,7 @@ SANDBOX_HOME=$(eval echo "~${SANDBOX_USER}")
 	prepScript := fmt.Sprintf(`set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 %s
+%s
 
 %s
 %s
@@ -457,7 +459,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 mkdir -p /workspace
 echo "GOAUDIT_WARM_READY" >&2
-	`, prepScriptForRuntime(s.runtime), setupScript, toolsCheck, userSetup, honeypotScript()+packageManagerConfigScript())
+	`, prepScriptForRuntime(s.runtime), packageManagerConfigScript(), setupScript, toolsCheck, userSetup, honeypotScript())
 
 	pidsLimit := int64(256)
 	hostConfig := &container.HostConfig{
