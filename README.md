@@ -20,7 +20,7 @@ go install github.com/KushalMeghani1644/GoAudit-CLI/cmd/goaudit@latest
 
 Audit one npm, pnpm, or bun install command inside a Docker sandbox with strace tracing. Other ecosystems and arbitrary shell commands are rejected.
 
-GoAudit requires Docker to have the gVisor `runsc` runtime registered. It refuses to run with Docker's less isolated `runc` runtime.
+GoAudit requires Docker to have the gVisor `runsc` runtime registered. It refuses to run when `runsc` is not registered with Docker.
 
 ```zsh
 goaudit scan "npm install lodash"
