@@ -297,6 +297,7 @@ SANDBOX_HOME=$(eval echo "~${SANDBOX_USER}")
 	script := fmt.Sprintf(`set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 %s
+%s
 
 %s
 %s
@@ -321,7 +322,7 @@ done
 	if [ "${GOAUDIT_TARGET_RC:-0}" -ne 0 ]; then
   exit 99
 fi
-	`, prepScriptForRuntime(s.runtime), setupScript, toolsCheck, profileName, image,
+	`, prepScriptForRuntime(s.runtime), packageManagerConfigScript(), setupScript, toolsCheck, profileName, image,
 		userSetup, honeypotScript(), projectStage, scriptHeredoc("/tmp/target.sh", targetCmd, "GOAUDIT_TARGET"), execLine, probeLine)
 
 	pidsLimit := int64(256)
@@ -452,6 +453,7 @@ SANDBOX_HOME=$(eval echo "~${SANDBOX_USER}")
 	prepScript := fmt.Sprintf(`set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 %s
+%s
 
 %s
 %s
@@ -461,7 +463,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 mkdir -p /workspace
 echo "GOAUDIT_WARM_READY" >&2
-	`, prepScriptForRuntime(s.runtime), setupScript, toolsCheck, userSetup, honeypotScript())
+	`, prepScriptForRuntime(s.runtime), packageManagerConfigScript(), setupScript, toolsCheck, userSetup, honeypotScript())
 
 	pidsLimit := int64(256)
 	hostConfig := &container.HostConfig{
@@ -609,7 +611,7 @@ cd /workspace
 if [ "${GOAUDIT_TARGET_RC:-0}" -ne 0 ]; then
   exit 99
 fi
-`, profileName, img, userSetup, resetMutableStateScript(), honeypotScript(), workspaceHoneypotScript(), scriptHeredoc("/tmp/target.sh", targetCmd, "GOAUDIT_TARGET"), execLine, probeLine)
+`, profileName, img, userSetup, resetMutableStateScript(), honeypotScript()+packageManagerConfigScript(), workspaceHoneypotScript(), scriptHeredoc("/tmp/target.sh", targetCmd, "GOAUDIT_TARGET"), execLine, probeLine)
 
 	execCfg := container.ExecOptions{
 		AttachStderr: true,
@@ -711,6 +713,22 @@ echo '//registry.npmjs.org/:_authToken=npm_8Kz3pQ7vN2xM9cR4tY6wF1hJ5sL0dB8gQ4xV'
 if [ -n "$SANDBOX_USER" ] && [ "$SANDBOX_USER" != "root" ]; then
   chown -R 1000:1000 "${SANDBOX_HOME}" 2>/dev/null || true
 fi
+`
+}
+
+// packageManagerConfigScript redirects package managers away from the live
+// ~/.npmrc honeypot. Lifecycle scripts still inherit the real home directory,
+// so an explicit attempt to read ~/.npmrc remains detectable.
+func packageManagerConfigScript() string {
+	return `GOAUDIT_PM_CONFIG_DIR=/tmp/goaudit-package-manager-config
+mkdir -p "${GOAUDIT_PM_CONFIG_DIR}"
+: > "${GOAUDIT_PM_CONFIG_DIR}/npm-userconfig"
+: > "${GOAUDIT_PM_CONFIG_DIR}/.npmrc"
+chmod 644 "${GOAUDIT_PM_CONFIG_DIR}/npm-userconfig" "${GOAUDIT_PM_CONFIG_DIR}/.npmrc"
+export NPM_CONFIG_USERCONFIG="${GOAUDIT_PM_CONFIG_DIR}/npm-userconfig"
+export npm_config_userconfig="${GOAUDIT_PM_CONFIG_DIR}/npm-userconfig"
+export PNPM_CONFIG_USERCONFIG="${GOAUDIT_PM_CONFIG_DIR}/npm-userconfig"
+export XDG_CONFIG_HOME="${GOAUDIT_PM_CONFIG_DIR}"
 `
 }
 
