@@ -3,9 +3,9 @@ package sandbox
 import (
 	"context"
 
+	"github.com/goaudit/cli/internal/diagnostic"
 	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/client"
-	"github.com/goaudit/cli/internal/diagnostic"
 )
 
 // NodeSandboxImage is the published Node sandbox image used for gVisor scans.

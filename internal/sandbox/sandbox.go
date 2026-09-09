@@ -11,13 +11,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goaudit/cli/internal/diagnostic"
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
-	"github.com/goaudit/cli/internal/diagnostic"
 )
 
 // SandboxOptions controls sandbox security policies.

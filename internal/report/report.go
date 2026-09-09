@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/goaudit/cli/internal/diagnostic"
+	"github.com/fatih/color"
 )
 
 type Severity string
