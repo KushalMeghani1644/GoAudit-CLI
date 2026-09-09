@@ -3,7 +3,7 @@ package analyzer
 import (
 	"strings"
 
-	"github.com/goaudit/cli/internal/report"
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/report"
 )
 
 func AnalyzeCommand(command string) []report.Finding {

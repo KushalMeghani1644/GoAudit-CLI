@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/goaudit/cli/internal/sandbox"
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/sandbox"
 	"github.com/spf13/cobra"
 )
 

@@ -3,7 +3,7 @@ package analyzer
 import (
 	"regexp"
 
-	"github.com/goaudit/cli/internal/report"
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/report"
 )
 
 var suspiciousScriptPatterns = []struct {

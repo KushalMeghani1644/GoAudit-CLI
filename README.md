@@ -11,7 +11,7 @@ Use `goaudit scan` to audit a single npm, pnpm, or bun install command. Use `goa
 ## Install
 
 ```zsh
-go install github.com/goaudit/cli/cmd/goaudit@latest
+go install github.com/KushalMeghani1644/GoAudit-CLI/cmd/goaudit@latest
 ```
 
 ## Usage

@@ -6,9 +6,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/goaudit/cli/internal/analyzer"
-	"github.com/goaudit/cli/internal/project"
-	"github.com/goaudit/cli/internal/report"
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/analyzer"
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/project"
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/report"
 	"github.com/spf13/cobra"
 )
 

@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/goaudit/cli/internal/diagnostic"
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/diagnostic"
 )
 
 // DepSpec is a package name with an optional version/range for static analysis.

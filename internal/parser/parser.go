@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/goaudit/cli/internal/report"
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/report"
 )
 
 // HasPrepFailure reports whether sandbox container logs indicate prep_failed.

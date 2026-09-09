@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/goaudit/cli/internal/diagnostic"
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/diagnostic"
 )
 
 const (

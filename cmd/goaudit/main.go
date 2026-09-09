@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/goaudit/cli/cmd"
+	"github.com/KushalMeghani1644/GoAudit-CLI/cmd"
 )
 
 func main() {

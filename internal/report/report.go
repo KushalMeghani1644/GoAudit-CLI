@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/goaudit/cli/internal/diagnostic"
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/diagnostic"
 	"github.com/fatih/color"
 )
 

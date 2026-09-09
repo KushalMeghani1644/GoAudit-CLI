@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goaudit/cli/internal/report"
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/report"
 )
 
 func TestExtractNPMPackageSpecs(t *testing.T) {
