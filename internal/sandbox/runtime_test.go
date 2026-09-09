@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goaudit/cli/internal/diagnostic"
 	"github.com/docker/docker/api/types/system"
+	"github.com/goaudit/cli/internal/diagnostic"
 )
 
 func TestRuntimeFromDockerInfo(t *testing.T) {
