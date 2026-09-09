@@ -31,7 +31,8 @@ jobs:
         run: |
           # The preinstalled Google Chrome apt repo intermittently serves
           # stale indexes and fails apt-get update; CI does not need it.
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          # (xargs rm -f is a no-op when the repo is not configured.)
+          grep -rl "dl.google.com/linux/chrome" /etc/apt/sources.list /etc/apt/sources.list.d/ | sudo xargs rm -f
           sudo apt-get update
           sudo apt-get install --yes openssh-client
           command -v ssh-keygen
@@ -76,7 +77,8 @@ jobs:
         run: |
           # The preinstalled Google Chrome apt repo intermittently serves
           # stale indexes and fails apt-get update; CI does not need it.
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          # (xargs rm -f is a no-op when the repo is not configured.)
+          grep -rl "dl.google.com/linux/chrome" /etc/apt/sources.list /etc/apt/sources.list.d/ | sudo xargs rm -f
           arch="$(dpkg --print-architecture)"
           curl -fsSL https://gvisor.dev/archive.key |
             sudo gpg --dearmor --yes -o /usr/share/keyrings/gvisor-archive-keyring.gpg
