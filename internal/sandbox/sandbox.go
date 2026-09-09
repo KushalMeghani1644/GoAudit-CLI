@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/KushalMeghani1644/GoAudit-CLI/internal/diagnostic"
+	"github.com/goaudit/cli/internal/diagnostic"
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"

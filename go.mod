@@ -1,4 +1,4 @@
-module github.com/KushalMeghani1644/GoAudit-CLI
+module github.com/goaudit/cli
 
 go 1.26.3
 

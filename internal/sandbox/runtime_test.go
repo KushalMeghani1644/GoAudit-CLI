@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/KushalMeghani1644/GoAudit-CLI/internal/diagnostic"
+	"github.com/goaudit/cli/internal/diagnostic"
 	"github.com/docker/docker/api/types/system"
 )
 
@@ -27,7 +27,7 @@ func TestNodeSandboxImageUsesGHCR(t *testing.T) {
 }
 
 func TestGVisorSetupURLLinksToDocumentation(t *testing.T) {
-	if !strings.HasPrefix(GVisorSetupURL, "https://github.com/KushalMeghani1644/GoAudit-CLI#") {
+	if !strings.HasPrefix(GVisorSetupURL, "https://github.com/goaudit/cli#") {
 		t.Fatalf("unexpected gVisor setup URL: %s", GVisorSetupURL)
 	}
 }

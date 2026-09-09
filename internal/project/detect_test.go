@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/KushalMeghani1644/GoAudit-CLI/internal/diagnostic"
+	"github.com/goaudit/cli/internal/diagnostic"
 )
 
 func TestDetectManagerFromLockfiles(t *testing.T) {

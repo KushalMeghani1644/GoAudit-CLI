@@ -3,7 +3,7 @@ package project
 import (
 	"fmt"
 
-	"github.com/KushalMeghani1644/GoAudit-CLI/internal/diagnostic"
+	"github.com/goaudit/cli/internal/diagnostic"
 )
 
 func BuildInstallCommand(manager string, mode UpgradeMode) (string, error) {

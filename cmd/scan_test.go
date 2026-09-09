@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/KushalMeghani1644/GoAudit-CLI/internal/parser"
+	"github.com/goaudit/cli/internal/parser"
 )
 
 func TestInferProfileForPackageManagers(t *testing.T) {

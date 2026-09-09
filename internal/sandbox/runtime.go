@@ -3,7 +3,7 @@ package sandbox
 import (
 	"context"
 
-	"github.com/KushalMeghani1644/GoAudit-CLI/internal/diagnostic"
+	"github.com/goaudit/cli/internal/diagnostic"
 	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/client"
 )
@@ -12,7 +12,7 @@ import (
 const NodeSandboxImage = "ghcr.io/kushalmeghani1644/goaudit-node-sandbox:latest"
 
 // GVisorSetupURL documents how to install and register runsc with Docker.
-const GVisorSetupURL = "https://github.com/KushalMeghani1644/GoAudit-CLI#gvisor-runsc-on-fedora--selinux"
+const GVisorSetupURL = "https://github.com/goaudit/cli#gvisor-runsc-on-fedora--selinux"
 
 // DefaultNodeImage is the stock Node image used to identify the default Node profile.
 const DefaultNodeImage = "node:current-slim"

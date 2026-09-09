@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/KushalMeghani1644/GoAudit-CLI/internal/report"
+	"github.com/goaudit/cli/internal/report"
 )
 
 var npmRegistryBaseURL = "https://registry.npmjs.org"
