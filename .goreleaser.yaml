@@ -1,0 +1,39 @@
+version: 2
+
+project_name: goaudit
+
+builds:
+  - id: goaudit
+    main: ./cmd/goaudit
+    binary: goaudit
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats: [tar.gz]
+    name_template: "goaudit_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+homebrew_casks:
+  - repository:
+      owner: KushalMeghani1644
+      name: homebrew-tap
+      token: "{{ .Env.GITHUB_TOKEN }}"
+    homepage: "https://github.com/KushalMeghani1644/GoAudit-CLI"
+    description: "Sandbox security scanner for JavaScript package installs"
