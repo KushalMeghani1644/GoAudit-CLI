@@ -114,7 +114,7 @@ var scanProjectCmd = &cobra.Command{
 		// via /project-ro (bind-mount remains readable for the whole scan).
 		stage, err := project.StageForSandbox(proj.Root, project.StageOptions{FullTree: mountProject})
 		if err != nil {
-			reporter.Fatalf("%v\n", err)
+			reporter.Fatal(err)
 		}
 		if mountProject {
 			f := report.Finding{
@@ -141,7 +141,7 @@ var scanProjectCmd = &cobra.Command{
 			})
 			stage.Cleanup()
 			if err != nil {
-				reporter.Fatalf("%v\n", err)
+				reporter.Fatal(err)
 			}
 			return
 		}
@@ -158,7 +158,7 @@ var scanProjectCmd = &cobra.Command{
 		})
 		stage.Cleanup()
 		if err != nil {
-			reporter.Fatalf("%v\n", err)
+			reporter.Fatal(err)
 		}
 		if fail {
 			os.Exit(1)

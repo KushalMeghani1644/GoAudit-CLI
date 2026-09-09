@@ -1,7 +1,7 @@
 package sandbox
 
 // aptPrepScript installs sandbox tools via apt only when base scan tools are missing.
-// Published sandbox images skip apt at scan time; runc fallback may still use apt.
+// Published sandbox images skip apt at scan time; custom images may still use apt.
 const aptPrepScript = `if ! command -v strace >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 || ! command -v rsync >/dev/null 2>&1; then
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update -qq > /dev/null 2>&1 || { echo "GOAUDIT_RUNTIME_ERROR:prep_failed" >&2; exit 98; }
