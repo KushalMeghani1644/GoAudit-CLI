@@ -31,8 +31,13 @@ jobs:
         run: |
           # The preinstalled Google Chrome apt repo intermittently serves
           # stale indexes and fails apt-get update; CI does not need it.
-          # (xargs rm -f is a no-op when the repo is not configured.)
-          grep -rl "dl.google.com/linux/chrome" /etc/apt/sources.list /etc/apt/sources.list.d/ | sudo xargs rm -f
+          # (a plain grep -rl | xargs rm would fail under pipefail when
+          # nothing matches, so match per-file instead)
+          for source in /etc/apt/sources.list /etc/apt/sources.list.d/*; do
+            if [ -f "$source" ] && sudo grep -q "dl.google.com/linux/chrome" "$source"; then
+              sudo rm -f -- "$source"
+            fi
+          done
           sudo apt-get update
           sudo apt-get install --yes openssh-client
           command -v ssh-keygen
@@ -77,8 +82,13 @@ jobs:
         run: |
           # The preinstalled Google Chrome apt repo intermittently serves
           # stale indexes and fails apt-get update; CI does not need it.
-          # (xargs rm -f is a no-op when the repo is not configured.)
-          grep -rl "dl.google.com/linux/chrome" /etc/apt/sources.list /etc/apt/sources.list.d/ | sudo xargs rm -f
+          # (a plain grep -rl | xargs rm would fail under pipefail when
+          # nothing matches, so match per-file instead)
+          for source in /etc/apt/sources.list /etc/apt/sources.list.d/*; do
+            if [ -f "$source" ] && sudo grep -q "dl.google.com/linux/chrome" "$source"; then
+              sudo rm -f -- "$source"
+            fi
+          done
           arch="$(dpkg --print-architecture)"
           curl -fsSL https://gvisor.dev/archive.key |
             sudo gpg --dearmor --yes -o /usr/share/keyrings/gvisor-archive-keyring.gpg
