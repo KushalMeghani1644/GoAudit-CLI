@@ -199,7 +199,7 @@ func TestEvaluate_ScoringEdgeCases(t *testing.T) {
 		{
 			name: "Score 20 (CLEAN)",
 			findings: []Finding{
-				{Severity: SeverityWarning, ReasonCode: "POLICY_BLOCKED_DOMAIN"}, // 20
+				{Severity: SeverityWarning, ReasonCode: "INTERNAL_NETWORK"}, // 20
 			},
 			expectedVerdict: VerdictClean,
 			expectedScore:   75,
@@ -215,8 +215,8 @@ func TestEvaluate_ScoringEdgeCases(t *testing.T) {
 		{
 			name: "Score 75 (SUSPICIOUS)",
 			findings: []Finding{
-				{Severity: SeverityWarning, ReasonCode: "STAGED_DOWNLOADER"},     // 55
-				{Severity: SeverityWarning, ReasonCode: "POLICY_BLOCKED_DOMAIN"}, // 20
+				{Severity: SeverityWarning, ReasonCode: "STAGED_DOWNLOADER"}, // 55
+				{Severity: SeverityWarning, ReasonCode: "INTERNAL_NETWORK"},  // 20
 			},
 			expectedVerdict: VerdictSuspicious,
 			expectedScore:   40 + (75 / 2),
