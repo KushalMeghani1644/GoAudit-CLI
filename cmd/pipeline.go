@@ -150,19 +150,22 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 		defer cache.Close()
 	}
 
-	// Try to use cached sandbox if available.
+	// Atomically claim a cached sandbox if available. A claimed container is
+	// single-use: no other target can observe state mutated by this scan.
 	if cache != nil && opts.projectPath == "" {
-		cached := cache.Lookup(ctx, s.Runtime(), profile.Name, networkEnabled)
+		cached := cache.Take(ctx, s.Runtime(), profile.Name, networkEnabled)
 		if cached != nil {
 			if cached.Image != profile.Image {
-				cache.Invalidate(ctx, cached.Runtime, profile.Name, cached.Network)
+				s.SetContainerID(cached.ContainerID)
+				s.Cleanup(ctx, false)
 				cached = nil
 			}
 		}
 		if cached != nil {
 			refresh, _ := cache.ShouldRefreshLatest(ctx, cached)
 			if refresh {
-				cache.Invalidate(ctx, cached.Runtime, profile.Name, cached.Network)
+				s.SetContainerID(cached.ContainerID)
+				s.Cleanup(ctx, false)
 				cached = nil
 			}
 		}
@@ -172,13 +175,13 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 				s.SetContainerID(cached.ContainerID)
 				s.SetImage(cached.Image)
 				s.SetRuntime(cached.Runtime)
-				cache.TouchLastUsed(cached.Runtime, profile.Name, cached.Network)
 				usedCache = true
 				// Update profile image to match the cached one.
 				profile.Image = cached.Image
 			} else {
-				// Image changed, invalidate old cache.
-				cache.Invalidate(ctx, cached.Runtime, profile.Name, cached.Network)
+				// Image changed; discard the claimed container.
+				s.SetContainerID(cached.ContainerID)
+				s.Cleanup(ctx, false)
 			}
 		}
 	}
@@ -202,10 +205,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 	if usedCache {
 		dynamicFindings, sandboxRuntime, traceHealth, err = runCachedSandboxAndParse(ctx, s, profile, runTargetCmd, probeScript, opts, registryIPs, reporter)
 		if err != nil {
-			// Cache might be stale; invalidate and fall through to cold path.
-			if cache != nil {
-				cache.Invalidate(ctx, s.Runtime(), profile.Name, networkEnabled)
-			}
+			// The claimed cache might be stale; destroy it and fall through.
 			s.Cleanup(ctx, false)
 			if !ciMode {
 				reporter.StopProgress()
@@ -242,9 +242,9 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 
 	findings = append(findings, dynamicFindings...)
 
-	// Cache the warm container for next time (if caching is enabled and we did a cold run).
-	if cache != nil && !noCache && !usedCache && opts.projectPath == "" {
-		// Warm-prepare a fresh container for the cache.
+	// Every cached container is consumed by at most one target. Prepare a clean
+	// replacement after both cached and cold scans.
+	if cache != nil && !noCache && opts.projectPath == "" {
 		reporter.UpdateProgress("Warming sandbox cache...")
 		warmSandbox, warmErr := sandbox.NewSandbox(ctx, s.Image(), sandbox.SandboxOptions{
 			NetworkEnabled: networkEnabled,
@@ -257,8 +257,11 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 				if digestErr != nil {
 					digest = cache.LocalImageDigest(ctx, s.Image())
 				}
-				if storeErr := cache.Store(ctx, s.Runtime(), profile.Name, networkEnabled, warmSandbox.ContainerID(), s.Image(), digest); storeErr != nil && !ciMode {
-					fmt.Printf("\033[33m[WARNING] Could not save cache: %v\033[0m\r\n", storeErr)
+				if storeErr := cache.Store(ctx, s.Runtime(), profile.Name, networkEnabled, warmSandbox.ContainerID(), s.Image(), digest); storeErr != nil {
+					warmSandbox.Cleanup(ctx, false)
+					if !ciMode {
+						fmt.Printf("\033[33m[WARNING] Could not save cache: %v\033[0m\r\n", storeErr)
+					}
 				}
 			} else {
 				warmSandbox.Cleanup(ctx, false)
@@ -269,8 +272,8 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 		}
 	}
 
-	// Cleanup the scan container (not the cached warm container).
-	s.Cleanup(ctx, usedCache)
+	// A scan container is always disposable, including one claimed from cache.
+	s.Cleanup(ctx, false)
 
 	meta := report.ReportMeta{
 		Command:                  targetCmd,
