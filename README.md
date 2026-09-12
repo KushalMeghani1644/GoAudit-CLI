@@ -10,6 +10,20 @@ Use `goaudit scan` to audit a single npm, pnpm, or bun install command. Use `goa
 
 ## Install
 
+**Homebrew** (macOS and Linux):
+
+```zsh
+brew install --cask KushalMeghani1644/tap/goaudit
+```
+
+**mise**:
+
+```zsh
+mise use -g github:KushalMeghani1644/GoAudit-CLI
+```
+
+**Go**:
+
 ```zsh
 go install github.com/KushalMeghani1644/GoAudit-CLI/cmd/goaudit@latest
 ```

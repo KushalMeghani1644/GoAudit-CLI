@@ -1,0 +1,56 @@
+version: 2
+
+project_name: goaudit
+
+builds:
+  - id: goaudit
+    main: ./cmd/goaudit
+    binary: goaudit
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats: [tar.gz]
+    name_template: "goaudit_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+# macOS Gatekeeper rejects unsigned downloads ("damaged and cannot be
+# opened"), so darwin artifacts are signed and notarized before publish.
+# Skipped unless the Apple Developer credentials are configured as
+# release-workflow secrets; covers both amd64 and arm64 darwin builds.
+notarize:
+  macos:
+    - enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'
+      sign:
+        certificate: "{{ .Env.MACOS_SIGN_P12 }}"
+        password: "{{ .Env.MACOS_SIGN_PASSWORD }}"
+      notarize:
+        issuer_id: "{{ .Env.MACOS_NOTARY_ISSUER_ID }}"
+        key_id: "{{ .Env.MACOS_NOTARY_KEY_ID }}"
+        key: "{{ .Env.MACOS_NOTARY_KEY }}"
+        wait: true
+        timeout: 20m
+
+homebrew_casks:
+  - repository:
+      owner: KushalMeghani1644
+      name: homebrew-tap
+      token: "{{ .Env.GITHUB_TOKEN }}"
+    homepage: "https://github.com/KushalMeghani1644/GoAudit-CLI"
+    description: "Sandbox security scanner for JavaScript package installs"
