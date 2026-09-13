@@ -8,6 +8,41 @@ It inspects npm, pnpm, and bun installs and project upgrades for suspicious file
 
 Use `goaudit scan` to audit a single npm, pnpm, or bun install command. Use `goaudit scan-project` to audit a JavaScript project before upgrading dependencies.
 
+## Demo
+
+Real output from `main` in a gVisor (`runsc`) sandbox:
+
+```zsh
+goaudit scan "npm install lodash@4.17.21"
+```
+
+```text
+GoAudit Report
+────────────────────────────────────────────────────────────────
+Command: npm install lodash@4.17.21
+Verdict: SUSPICIOUS (confidence: 55)
+Sandbox: gVisor (runsc)
+
+What GoAudit Observed
+   1. GoAudit did not collect enough clear behavioral evidence to describe the run.
+Runtime Probe
+   - Runtime import probe completed without suspicious behavior
+   - No credential access, suspicious writes, or unknown exfiltration detected during import
+
+Static Warnings
+────────────────────────────────────────────────────────────────
+   1. [WARNING] LIFECYCLE SCRIPTS: npm install lodash@4.17.21
+      Details: npm install runs lifecycle scripts (preinstall/postinstall) — this is common
+
+Network Activity (expected)
+   - 1 connection(s) to registry.npmjs.org (registry)
+   - 1 connection(s) to 1 host(s)
+Summary: 0 critical (0 install-time, 0 probe, 0 static), 1 warnings, 13 informational
+   Use --ci for full JSON output.
+```
+
+`lodash` is benign here: the single warning is the expected npm lifecycle-scripts notice, only registry network traffic was observed, and the runtime probe was clean.
+
 ## Install
 
 **Homebrew** (macOS and Linux):
