@@ -228,6 +228,63 @@ func TestTakeAtomicallyRemovesSingleUseContainer(t *testing.T) {
 	}
 }
 
+func TestStorePreservesExistingEntryWhenRemovalFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/containers/old/stop") {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/containers/old") {
+			http.Error(w, "removal failed", http.StatusInternalServerError)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	dockerClient, err := client.NewClientWithOpts(
+		client.WithHost(server.URL),
+		client.WithHTTPClient(server.Client()),
+		client.WithVersion("1.44"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dockerClient.Close()
+
+	dir := t.TempDir()
+	key := cacheKey("runsc", "npm", true)
+	cm := &CacheManager{
+		dir:      dir,
+		filePath: filepath.Join(dir, "cache.json"),
+		lockPath: filepath.Join(dir, "cache.lock"),
+		data: &CacheData{
+			Version: CacheVersion,
+			Containers: map[string]*CachedContainer{
+				key: {
+					ContainerID: "old",
+					Runtime:     "runsc",
+					Profile:     "npm",
+					Network:     true,
+					SingleUse:   true,
+				},
+			},
+		},
+		cli: dockerClient,
+	}
+	if err := cm.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+
+	err = cm.Store(context.Background(), "runsc", "npm", true, "new", "image", "digest")
+	if err == nil {
+		t.Fatal("Store() succeeded despite failure to remove the previous container")
+	}
+	if entry := cm.Entries()[key]; entry == nil || entry.ContainerID != "old" {
+		t.Fatalf("cached entry = %#v, want previous container old", entry)
+	}
+}
+
 func TestCacheLoadMissingFile(t *testing.T) {
 	dir := t.TempDir()
 	cm := &CacheManager{

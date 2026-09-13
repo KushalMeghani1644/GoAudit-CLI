@@ -206,7 +206,9 @@ func (cm *CacheManager) Store(ctx context.Context, runtime, profile string, netw
 
 	// If there's an existing entry with a different container, remove the old one.
 	if old, ok := cm.data.Containers[key]; ok && old.ContainerID != containerID {
-		_ = cm.stopAndRemoveContainer(ctx, old.ContainerID)
+		if err := cm.stopAndRemoveContainer(ctx, old.ContainerID); err != nil {
+			return fmt.Errorf("remove previous cached container %s: %w", old.ContainerID, err)
+		}
 	}
 
 	now := time.Now()
