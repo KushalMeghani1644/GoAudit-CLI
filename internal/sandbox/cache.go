@@ -35,6 +35,7 @@ type CachedContainer struct {
 	Runtime     string    `json:"runtime"`
 	Profile     string    `json:"profile"`
 	Network     bool      `json:"network_enabled"`
+	SingleUse   bool      `json:"single_use"`
 	ImageDigest string    `json:"image_digest"`
 	CreatedAt   time.Time `json:"created_at"`
 	LastUsed    time.Time `json:"last_used"`
@@ -110,7 +111,7 @@ func cacheKey(runtime, profile string, networkEnabled bool) string {
 	return fmt.Sprintf("%s:%s:net=%t", rt, profile, networkEnabled)
 }
 
-// Lookup finds a valid cached container for the given runtime, profile, and policy.
+// Lookup finds a valid, unclaimed cached container for the given runtime, profile, and policy.
 // Returns nil if no valid entry exists.
 func (cm *CacheManager) Lookup(ctx context.Context, runtime, profile string, networkEnabled bool) *CachedContainer {
 	cm.mu.Lock()
@@ -132,6 +133,13 @@ func (cm *CacheManager) Lookup(ctx context.Context, runtime, profile string, net
 		return nil
 	}
 
+	// Entries created before cached containers became single-use may contain
+	// mutations from an earlier target and must never be reused.
+	if !entry.SingleUse {
+		cm.removeEntryLocked(ctx, key)
+		return nil
+	}
+
 	// Check container still exists and network mode matches the cache key policy.
 	// Historical bug: warm containers were stored under net=true but created offline.
 	if !cm.containerExists(ctx, entry.ContainerID) || !cm.containerNetworkMatches(ctx, entry.ContainerID, networkEnabled) {
@@ -140,6 +148,42 @@ func (cm *CacheManager) Lookup(ctx context.Context, runtime, profile string, net
 		return nil
 	}
 
+	return entry
+}
+
+// Take atomically claims a valid cached container for one scan. The entry is
+// removed from the shared cache before it is returned, preventing concurrent
+// scans or later targets from executing in the same mutable container.
+func (cm *CacheManager) Take(ctx context.Context, runtime, profile string, networkEnabled bool) *CachedContainer {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	lf, err := cm.lock()
+	if err != nil {
+		return nil
+	}
+	defer cm.unlock(lf)
+
+	if err := cm.reloadLocked(); err != nil {
+		return nil
+	}
+
+	key := cacheKey(runtime, profile, networkEnabled)
+	entry, ok := cm.data.Containers[key]
+	if !ok {
+		return nil
+	}
+	if !entry.SingleUse || !cm.containerExists(ctx, entry.ContainerID) ||
+		!cm.containerNetworkMatches(ctx, entry.ContainerID, networkEnabled) {
+		cm.removeEntryLocked(ctx, key)
+		return nil
+	}
+
+	delete(cm.data.Containers, key)
+	if err := cm.saveLocked(); err != nil {
+		cm.data.Containers[key] = entry
+		return nil
+	}
 	return entry
 }
 
@@ -162,7 +206,9 @@ func (cm *CacheManager) Store(ctx context.Context, runtime, profile string, netw
 
 	// If there's an existing entry with a different container, remove the old one.
 	if old, ok := cm.data.Containers[key]; ok && old.ContainerID != containerID {
-		_ = cm.stopAndRemoveContainer(ctx, old.ContainerID)
+		if err := cm.stopAndRemoveContainer(ctx, old.ContainerID); err != nil {
+			return fmt.Errorf("remove previous cached container %s: %w", old.ContainerID, err)
+		}
 	}
 
 	now := time.Now()
@@ -172,6 +218,7 @@ func (cm *CacheManager) Store(ctx context.Context, runtime, profile string, netw
 		Runtime:     runtime,
 		Profile:     profile,
 		Network:     networkEnabled,
+		SingleUse:   true,
 		ImageDigest: digest,
 		CreatedAt:   now,
 		LastUsed:    now,

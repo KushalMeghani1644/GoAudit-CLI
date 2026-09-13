@@ -528,8 +528,9 @@ func sandboxHomeGuardScript() string {
 `
 }
 
-// resetMutableStateScript clears user-writable state left by a prior scan so
-// warm-container reuse does not leak configs, caches, or PATH-controlled files.
+// resetMutableStateScript clears preparation-time mutable state before a warm
+// container's single scan. Cached containers are never shared between targets;
+// this cleanup is defense in depth rather than the isolation boundary.
 func resetMutableStateScript() string {
 	return fmt.Sprintf(`
 # --- goaudit: reset mutable state between cached scans ---
@@ -550,8 +551,8 @@ rm -rf /usr/local/share/.cache 2>/dev/null || true
 `, sandboxHomeGuardScript())
 }
 
-// ExecScan runs a scan command on an already-prepared (warm) container.
-// The container should have been created by PrepareWarm and be in a stopped state.
+// ExecScan runs a scan command on an already-prepared, single-use warm container.
+// The caller must destroy the container afterward rather than return it to cache.
 func (s *Sandbox) ExecScan(ctx context.Context, targetCmd, probeScript, profileName, img string, projectPath string, targetTimeoutValue, probeTimeoutValue string) (io.Reader, error) {
 	if projectPath != "" {
 		return nil, fmt.Errorf("cached project scans are not supported")

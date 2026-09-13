@@ -182,7 +182,7 @@ For `scan`, multi-local package installs refuse mounting the working directory u
 
 ## Cache
 
-GoAudit caches prepared sandbox containers to speed up repeat scans.
+GoAudit caches prepared sandbox containers to speed up repeat scans. Each warm container is atomically claimed for one target, destroyed after that scan, and replaced with a clean container so target-mutated state is never reused.
 
 ```zsh
 goaudit cache status

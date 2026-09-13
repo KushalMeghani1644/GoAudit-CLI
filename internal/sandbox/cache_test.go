@@ -1,12 +1,17 @@
 package sandbox
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/docker/docker/client"
 )
 
 func TestCacheKey(t *testing.T) {
@@ -131,6 +136,152 @@ func TestCacheDataLoadSave(t *testing.T) {
 	}
 	if _, ok := cm2.data.Containers["runc:npm:net=false"]; !ok {
 		t.Fatal("expected runc:npm entry after save+reload")
+	}
+}
+
+func TestTakeAtomicallyRemovesSingleUseContainer(t *testing.T) {
+	var inspectRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/containers/abc123/json") {
+			inspectRequests++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"Id":"abc123","State":{"Running":false},"HostConfig":{"NetworkMode":"bridge"}}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	dockerClient, err := client.NewClientWithOpts(
+		client.WithHost(server.URL),
+		client.WithHTTPClient(server.Client()),
+		client.WithVersion("1.44"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dockerClient.Close()
+
+	dir := t.TempDir()
+	cm := &CacheManager{
+		dir:      dir,
+		filePath: filepath.Join(dir, "cache.json"),
+		lockPath: filepath.Join(dir, "cache.lock"),
+		data: &CacheData{
+			Version: CacheVersion,
+			Containers: map[string]*CachedContainer{
+				"runsc:npm:net=true": {
+					ContainerID: "abc123",
+					Runtime:     "runsc",
+					Profile:     "npm",
+					Network:     true,
+					SingleUse:   true,
+				},
+			},
+		},
+		cli: dockerClient,
+	}
+	if err := cm.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+
+	entry := cm.Take(context.Background(), "runsc", "npm", true)
+	if entry == nil || entry.ContainerID != "abc123" {
+		t.Fatalf("Take() = %#v, want container abc123", entry)
+	}
+
+	// A second manager models another process. The persisted claim must prevent
+	// it from receiving the same mutable container.
+	cm2 := &CacheManager{
+		dir:      dir,
+		filePath: filepath.Join(dir, "cache.json"),
+		lockPath: filepath.Join(dir, "cache.lock"),
+		cli:      dockerClient,
+	}
+	if second := cm2.Take(context.Background(), "runsc", "npm", true); second != nil {
+		t.Fatalf("second Take() = %#v, want nil", second)
+	}
+	if inspectRequests != 2 {
+		t.Fatalf("inspect requests = %d, want 2 for existence and network validation", inspectRequests)
+	}
+
+	// Entries written by older versions were reusable and may already contain
+	// target mutations. They must be discarded without ever being inspected for use.
+	cm.data.Containers["runsc:npm:net=true"] = &CachedContainer{
+		ContainerID: "legacy",
+		Runtime:     "runsc",
+		Profile:     "npm",
+		Network:     true,
+		SingleUse:   false,
+	}
+	if err := cm.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	if legacy := cm.Take(context.Background(), "runsc", "npm", true); legacy != nil {
+		t.Fatalf("Take() returned reusable legacy entry: %#v", legacy)
+	}
+	if entries := cm.Entries(); len(entries) != 0 {
+		t.Fatalf("legacy cache entry was not removed: %#v", entries)
+	}
+	if inspectRequests != 2 {
+		t.Fatal("legacy cache entry was inspected for reuse")
+	}
+}
+
+func TestStorePreservesExistingEntryWhenRemovalFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/containers/old/stop") {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/containers/old") {
+			http.Error(w, "removal failed", http.StatusInternalServerError)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	dockerClient, err := client.NewClientWithOpts(
+		client.WithHost(server.URL),
+		client.WithHTTPClient(server.Client()),
+		client.WithVersion("1.44"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dockerClient.Close()
+
+	dir := t.TempDir()
+	key := cacheKey("runsc", "npm", true)
+	cm := &CacheManager{
+		dir:      dir,
+		filePath: filepath.Join(dir, "cache.json"),
+		lockPath: filepath.Join(dir, "cache.lock"),
+		data: &CacheData{
+			Version: CacheVersion,
+			Containers: map[string]*CachedContainer{
+				key: {
+					ContainerID: "old",
+					Runtime:     "runsc",
+					Profile:     "npm",
+					Network:     true,
+					SingleUse:   true,
+				},
+			},
+		},
+		cli: dockerClient,
+	}
+	if err := cm.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+
+	err = cm.Store(context.Background(), "runsc", "npm", true, "new", "image", "digest")
+	if err == nil {
+		t.Fatal("Store() succeeded despite failure to remove the previous container")
+	}
+	if entry := cm.Entries()[key]; entry == nil || entry.ContainerID != "old" {
+		t.Fatalf("cached entry = %#v, want previous container old", entry)
 	}
 }
 
