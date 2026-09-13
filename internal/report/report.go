@@ -33,7 +33,30 @@ type Finding struct {
 	Severity   Severity `json:"severity"`
 	Type       string   `json:"type"`
 	ReasonCode string   `json:"reasonCode,omitempty"`
-	Confidence int      `json:"confidence,omitempty"`
+	// Confidence is retained internally for compatibility with analyzers while
+	// they migrate away from numeric heuristics. It is never exposed in reports.
+	Confidence int    `json:"-"`
+	Path       string `json:"path,omitempty"`
+	Host       string `json:"host,omitempty"`
+	Port       int    `json:"port,omitempty"`
+	IP         string `json:"ip,omitempty"`
+	Evidence   string `json:"evidence,omitempty"`
+}
+
+type SignalCategory string
+
+const (
+	SignalCredentialAccess    SignalCategory = "credential-access"
+	SignalPersistence         SignalCategory = "persistence"
+	SignalNetworkExfil        SignalCategory = "network-exfil"
+	SignalPrivilegeEscalation SignalCategory = "privilege-escalation"
+	SignalSuspiciousRegistry  SignalCategory = "suspicious-registry"
+)
+
+type Observation struct {
+	Kind       string   `json:"kind"`
+	Severity   Severity `json:"severity"`
+	ReasonCode string   `json:"reasonCode"`
 	Path       string   `json:"path,omitempty"`
 	Host       string   `json:"host,omitempty"`
 	Port       int      `json:"port,omitempty"`
@@ -41,10 +64,15 @@ type Finding struct {
 	Evidence   string   `json:"evidence,omitempty"`
 }
 
+type Signal struct {
+	Category     SignalCategory `json:"category"`
+	Observations []Observation  `json:"observations"`
+}
+
 type Report struct {
-	Verdict    Verdict   `json:"verdict"`
-	Confidence int       `json:"confidence"`
-	Findings   []Finding `json:"findings"`
+	Verdict     Verdict       `json:"verdict"`
+	Signals     []Signal      `json:"signals"`
+	Diagnostics []Observation `json:"diagnostics,omitempty"`
 }
 type ReportMeta struct {
 	Command                  string       `json:"command,omitempty"`
@@ -251,95 +279,6 @@ func isHardMalicious(f Finding) bool {
 		f.ReasonCode == "CLOUD_METADATA_ACCESS"
 }
 
-func reasonWeight(reasonCode string) int {
-	switch reasonCode {
-	case "CREDENTIAL_READ", "PERSISTENCE_WRITE", "PRIVILEGE_ESCALATION", "ENV_THEFT", "DATA_EXFIL", "OWNERSHIP_CHANGE", "MOUNT_OPERATION", "PRIVILEGED_KERNEL_OPERATION":
-		return 80
-	case "ACCOUNT_FILE_ACCESS":
-		// Warning-level attempts (e.g. denied /etc/shadow) should be suspicious, not
-		// auto-malicious by score alone. Critical successful access still forces
-		// MALICIOUS via severity.
-		return 45
-	case "SUID_SGID_BIT_SET", "CAPABILITY_ESCALATION", "NAMESPACE_ESCAPE_ATTEMPT", "LD_PRELOAD_PRIVILEGE_ATTEMPT":
-		return 70
-	case "CAPABILITY_CHANGE":
-		// Neutral capset drop/clear — noteworthy but not hard-malicious.
-		return 30
-	case "PRIVILEGE_ESCALATION_ATTEMPT", "PRIVILEGE_ESCALATION_EXEC":
-		return 45
-	case "MOUNT_OPERATION_ATTEMPT", "PRIVILEGED_KERNEL_OPERATION_ATTEMPT":
-		return 45
-	case "CREDENTIAL_READ_WITH_OUTBOUND":
-		return 50
-	case "STAGED_DOWNLOADER", "SUSPICIOUS_EXEC", "SCRIPT_OBFUSCATION":
-		return 55
-	case "FILELESS_EXEC", "PROCESS_INJECTION", "SYMLINK_SENSITIVE_PATH":
-		return 85
-	case "BACKDOOR_LISTENER":
-		return 55
-	case "CURL_PIPE_SHELL":
-		return 35
-	// Generic lifecycle warnings — always fire for any npm/pnpm/bun install.
-	// Low weight because they carry no package-specific signal.
-	case "NPM_LIFECYCLE_SCRIPTS", "PNPM_LIFECYCLE_SCRIPTS", "BUN_INSTALL_SCRIPTS":
-		return 10
-	// Package-specific lifecycle metadata — noteworthy but common for legit packages.
-	case "NPM_LIFECYCLE_SCRIPT_METADATA", "PNPM_LIFECYCLE_SCRIPT_METADATA", "BUN_LIFECYCLE_SCRIPT_METADATA":
-		return 20
-	case "NPM_NON_REGISTRY_SOURCE", "PNPM_NON_REGISTRY_SOURCE", "BUN_NON_REGISTRY_SOURCE":
-		return 45
-	case "NPM_RECENT_PACKAGE", "PNPM_RECENT_PACKAGE", "BUN_RECENT_PACKAGE":
-		return 20
-	case "UNEXPECTED_WRITE":
-		return 30
-	// External network — expected during package installs. Low individual weight.
-	case "EXTERNAL_NETWORK":
-		return 25
-	case "INTERNAL_NETWORK":
-		return 20
-	case "CLOUD_METADATA_ACCESS":
-		return 80
-	case "EXTERNAL_NETWORK_REGISTRY":
-		return 0
-	case "RUNTIME_MISSING_TOOL", "RUNTIME_PREP_FAILURE", "RUNTIME_TRACE_UNAVAILABLE":
-		return 60
-	case "RUNSC_TRACE_FALLBACK_RUNC":
-		return 0
-	case "TARGET_COMMAND_NOT_FOUND", "TARGET_COMMAND_FAILED", "TARGET_COMMAND_TIMEOUT", "PROBE_COMMAND_NOT_FOUND", "PROBE_COMMAND_FAILED", "PROBE_COMMAND_TIMEOUT":
-		return 60
-	case "INCONCLUSIVE_NPM_METADATA", "NPM_INCONCLUSIVE_METADATA":
-		return 10
-	case "INCONCLUSIVE_PNPM_METADATA", "INCONCLUSIVE_BUN_METADATA", "PNPM_INCONCLUSIVE_METADATA", "BUN_INCONCLUSIVE_METADATA":
-		return 10
-	case "RUNTIME_METADATA":
-		return 0
-	// Lifecycle content analysis (from registry script inspection)
-	case "NPM_LIFECYCLE_STAGED_DOWNLOADER", "PNPM_LIFECYCLE_STAGED_DOWNLOADER", "BUN_LIFECYCLE_STAGED_DOWNLOADER":
-		return 70
-	case "NPM_LIFECYCLE_REVERSE_SHELL", "PNPM_LIFECYCLE_REVERSE_SHELL", "BUN_LIFECYCLE_REVERSE_SHELL":
-		return 85
-	case "NPM_LIFECYCLE_CREDENTIAL_READ", "PNPM_LIFECYCLE_CREDENTIAL_READ", "BUN_LIFECYCLE_CREDENTIAL_READ":
-		return 80
-	case "NPM_LIFECYCLE_SCRIPT_OBFUSCATION", "PNPM_LIFECYCLE_SCRIPT_OBFUSCATION", "BUN_LIFECYCLE_SCRIPT_OBFUSCATION":
-		return 60
-	case "NPM_LIFECYCLE_PERSISTENCE_WRITE", "PNPM_LIFECYCLE_PERSISTENCE_WRITE", "BUN_LIFECYCLE_PERSISTENCE_WRITE":
-		return 80
-	default:
-		return 15
-	}
-}
-
-func isPrivilegeAttempt(f Finding) bool {
-	switch f.ReasonCode {
-	case "PRIVILEGE_ESCALATION_ATTEMPT", "MOUNT_OPERATION_ATTEMPT", "PRIVILEGED_KERNEL_OPERATION_ATTEMPT":
-		return true
-	case "ACCOUNT_FILE_ACCESS":
-		return f.Severity == SeverityWarning
-	default:
-		return false
-	}
-}
-
 func isExpectedBehaviorReason(reasonCode string) bool {
 	switch reasonCode {
 	case "NPM_LIFECYCLE_SCRIPTS", "PNPM_LIFECYCLE_SCRIPTS", "BUN_INSTALL_SCRIPTS", "EXTERNAL_NETWORK_REGISTRY":
@@ -349,13 +288,85 @@ func isExpectedBehaviorReason(reasonCode string) bool {
 	}
 }
 
-func Evaluate(findings []Finding, opts EvaluationOptions) (Verdict, int) {
-	if len(findings) == 0 {
-		return VerdictClean, 90
+// BuildSignals converts detector findings into the stable, evidence-first
+// report schema. Categories explain the risk; observations show what happened.
+func BuildSignals(findings []Finding) []Signal {
+	grouped := map[SignalCategory][]Observation{}
+	for _, finding := range findings {
+		if finding.Type == "runtime" || isOperationalFinding(finding) {
+			continue
+		}
+		category := SignalSuspiciousRegistry
+		kind := "registry-metadata-flag"
+		reason := strings.ToUpper(finding.ReasonCode)
+
+		switch {
+		case finding.Type == "fs_read" || strings.Contains(reason, "CREDENTIAL") || reason == "ENV_THEFT":
+			category, kind = SignalCredentialAccess, "file-read"
+		case finding.Type == "fs_write" || strings.Contains(reason, "PERSISTENCE") || reason == "SYMLINK_SENSITIVE_PATH":
+			category, kind = SignalPersistence, "file-write"
+		case finding.Type == "network" || strings.Contains(reason, "EXFIL") || reason == "BACKDOOR_LISTENER":
+			category, kind = SignalNetworkExfil, "network-connection"
+		case finding.Type == "privilege" || strings.Contains(reason, "PRIVILEGE") ||
+			strings.Contains(reason, "CAPABILITY") || strings.Contains(reason, "SUID") ||
+			strings.Contains(reason, "OWNERSHIP") || strings.Contains(reason, "MOUNT_OPERATION"):
+			category, kind = SignalPrivilegeEscalation, "privilege-operation"
+		case finding.Type == "exec" || finding.Type == "command":
+			category, kind = SignalPersistence, "process-spawn"
+		}
+
+		grouped[category] = append(grouped[category], Observation{
+			Kind:       kind,
+			Severity:   finding.Severity,
+			ReasonCode: finding.ReasonCode,
+			Path:       finding.Path,
+			Host:       finding.Host,
+			Port:       finding.Port,
+			IP:         finding.IP,
+			Evidence:   finding.Evidence,
+		})
 	}
 
-	score := 0
+	categories := []SignalCategory{
+		SignalCredentialAccess,
+		SignalPersistence,
+		SignalNetworkExfil,
+		SignalPrivilegeEscalation,
+		SignalSuspiciousRegistry,
+	}
+	signals := make([]Signal, 0, len(categories))
+	for _, category := range categories {
+		if observations := grouped[category]; len(observations) > 0 {
+			signals = append(signals, Signal{Category: category, Observations: observations})
+		}
+	}
+	return signals
+}
+
+func BuildDiagnostics(findings []Finding) []Observation {
+	var diagnostics []Observation
+	for _, finding := range findings {
+		if finding.Type != "runtime" && !isOperationalFinding(finding) {
+			continue
+		}
+		diagnostics = append(diagnostics, Observation{
+			Kind:       "diagnostic",
+			Severity:   finding.Severity,
+			ReasonCode: finding.ReasonCode,
+			Path:       finding.Path,
+			Evidence:   finding.Evidence,
+		})
+	}
+	return diagnostics
+}
+
+func Evaluate(findings []Finding, opts EvaluationOptions) Verdict {
+	if len(findings) == 0 {
+		return VerdictClean
+	}
+
 	malicious := false
+	suspicious := false
 	inconclusive := false
 	hasRunscFallback := false
 	hasRuncTraceUnavailable := false
@@ -367,7 +378,6 @@ func Evaluate(findings []Finding, opts EvaluationOptions) (Verdict, int) {
 			hasRuncTraceUnavailable = true
 		}
 	}
-	seenReasonWeight := map[string]int{}
 	for _, f := range findings {
 		if isHardMalicious(f) || f.Severity == SeverityCritical {
 			malicious = true
@@ -390,67 +400,37 @@ func Evaluate(findings []Finding, opts EvaluationOptions) (Verdict, int) {
 		if opts.SuppressExpectedBehavior && isExpectedBehaviorReason(f.ReasonCode) {
 			continue
 		}
-		w := reasonWeight(f.ReasonCode)
-		if isPrivilegeAttempt(f) {
-			// Failed privilege probes are one behavioral signal. Different syscall
-			// families from the same lifecycle command must not stack into a
-			// MALICIOUS verdict without a successful operation.
-			const group = "PRIVILEGE_OPERATION_ATTEMPT"
-			if seenReasonWeight[group] >= w {
-				continue
-			}
-			score += w - seenReasonWeight[group]
-			seenReasonWeight[group] = w
-			continue
+		if f.Severity == SeverityWarning && !isExpectedBehaviorReason(f.ReasonCode) {
+			suspicious = true
 		}
-		if f.ReasonCode == "EXTERNAL_NETWORK" || f.ReasonCode == "EXTERNAL_NETWORK_REGISTRY" {
-			// Cap total network contribution at 10 to avoid flooding the score.
-			if seenReasonWeight[f.ReasonCode] >= 10 {
-				continue
-			}
-			seenReasonWeight[f.ReasonCode] += w
-			score += w
-			continue
-		}
-		if _, exists := seenReasonWeight[f.ReasonCode]; exists {
-			continue
-		}
-		seenReasonWeight[f.ReasonCode] = w
-		score += w
-	}
-	if score > 100 {
-		score = 100
 	}
 
-	if inconclusive && !malicious {
-		return VerdictInconclusive, 35
+	if malicious {
+		return VerdictMalicious
 	}
-	if malicious || score >= 80 {
-		if score < 80 {
-			score = 80
-		}
-		return VerdictMalicious, score
+	if inconclusive {
+		return VerdictInconclusive
 	}
-	if score >= 25 {
-		return VerdictSuspicious, 40 + (score / 2)
+	if suspicious {
+		return VerdictSuspicious
 	}
-	return VerdictClean, 75
+	return VerdictClean
 }
 
-func (r *Reporter) Report(findings []Finding, meta ReportMeta) (Verdict, int) {
+func (r *Reporter) Report(findings []Finding, meta ReportMeta) Verdict {
 	r.StopProgress()
-	verdict, confidence := Evaluate(findings, EvaluationOptions{
+	verdict := Evaluate(findings, EvaluationOptions{
 		SuppressExpectedBehavior: meta.SuppressExpectedBehavior,
 	})
 
 	if r.CIMode {
 		rep := Report{
-			Verdict:    verdict,
-			Confidence: confidence,
-			Findings:   findings,
+			Verdict:     verdict,
+			Signals:     BuildSignals(findings),
+			Diagnostics: BuildDiagnostics(findings),
 		}
-		if rep.Findings == nil {
-			rep.Findings = []Finding{}
+		if rep.Signals == nil {
+			rep.Signals = []Signal{}
 		}
 		out, _ := json.MarshalIndent(struct {
 			Report
@@ -472,7 +452,7 @@ func (r *Reporter) Report(findings []Finding, meta ReportMeta) (Verdict, int) {
 				useColor = true
 			}
 		}
-		fmt.Print(FormatHumanReportStyled(findings, meta, verdict, confidence, HumanReportStyle{Color: useColor}) + "\r\n")
+		fmt.Print(FormatHumanReportStyled(findings, meta, verdict, HumanReportStyle{Color: useColor}) + "\r\n")
 	}
-	return verdict, confidence
+	return verdict
 }
