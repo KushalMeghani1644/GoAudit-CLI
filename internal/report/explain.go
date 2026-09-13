@@ -85,9 +85,6 @@ var reasonExplanations = map[string]Explanation{
 	"TARGET_COMMAND_FAILED":               {"Command Failed", "The target command exited with a non-zero status"},
 	"TARGET_COMMAND_NOT_FOUND":            {"Command Not Found", "The target command was not found in the sandbox"},
 	"RUNTIME_METADATA":                    {"Runtime Metadata", "Runtime metadata emitted by the sandbox for diagnostics"},
-	"SCRIPT_FETCHED":                      {"Remote Script Fetched", "A remote script was retrieved for static analysis"},
-	"SCRIPT_TRUNCATED":                    {"Remote Script Truncated", "Remote script exceeded the analysis size limit and was truncated"},
-	"SSRF_BLOCKED_DESTINATION":            {"Unsafe Remote Destination Blocked", "Remote script fetch blocked because the destination resolved to a non-public or disallowed address"},
 	"LOCAL_PACKAGE_REWRITE_UNAVAILABLE":   {"Local Package Rewrite Unavailable", "The local package install could not be rewritten to a single package directory; mounting the working directory is refused unless explicitly requested"},
 	"PROJECT_TREE_STAGED":                 {"Project Tree Staged", "A secret-redacted project copy, rather than the live host project, was bind-mounted into the sandbox"},
 	"STATIC_COVERAGE_LIMIT":               {"Static Coverage Limit", "Not all package specs were statically analyzed against the registry"},
@@ -98,8 +95,6 @@ var reasonExplanations = map[string]Explanation{
 	"BUN_VERSION_RESOLUTION_APPROXIMATE":  {"Approximate Version Analysis", "Static analysis used dist-tags.latest because the install spec was a range or unresolved tag"},
 
 	// Policy
-	"POLICY_BLOCKED_DOMAIN":      {"Blocked Domain", "Remote script URL was blocked by the domain allowlist policy"},
-	"INCONCLUSIVE_REMOTE_FETCH":  {"Fetch Failed", "Could not retrieve remote script for analysis"},
 	"INCONCLUSIVE_NPM_METADATA":  {"Metadata Fetch Failed", "Could not fetch npm package metadata for full static checks"},
 	"INCONCLUSIVE_PNPM_METADATA": {"Metadata Fetch Failed", "Could not fetch pnpm package metadata for full static checks"},
 	"INCONCLUSIVE_BUN_METADATA":  {"Metadata Fetch Failed", "Could not fetch bun package metadata for full static checks"},
