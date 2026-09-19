@@ -28,7 +28,12 @@ path, expected_verdict, expected_reason = sys.argv[1:]
 with open(path, encoding="utf-8") as report_file:
     report = json.load(report_file)
 
-reasons = {finding.get("reasonCode") for finding in report["findings"]}
+observations = (
+    observation
+    for signal in report["signals"]
+    for observation in signal["observations"]
+)
+reasons = {observation.get("reasonCode") for observation in observations}
 if report["verdict"] != expected_verdict:
     raise SystemExit(
         f"{path}: expected verdict {expected_verdict}, got {report['verdict']}; reasons={sorted(reasons)}"

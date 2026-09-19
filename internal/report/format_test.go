@@ -11,7 +11,7 @@ func TestFormatHumanReportSplitsInstallAndStatic(t *testing.T) {
 		{Severity: SeverityCritical, Type: "npm", ReasonCode: "NPM_LIFECYCLE_CREDENTIAL_READ", Path: "evil-pkg@1.0.0:preinstall"},
 		{Severity: SeverityInfo, Type: "runtime", ReasonCode: "RUNTIME_METADATA", Evidence: "phase=probe"},
 	}
-	out := FormatHumanReport(findings, ReportMeta{Command: "npm install ./evil"}, VerdictMalicious, 100)
+	out := FormatHumanReport(findings, ReportMeta{Command: "npm install ./evil"}, VerdictMalicious)
 	if !containsAll(out,
 		"Install-Time Behavior (observed in sandbox)",
 		"CREDENTIAL THEFT: /home/node/.ssh/id_rsa",
@@ -23,13 +23,19 @@ func TestFormatHumanReportSplitsInstallAndStatic(t *testing.T) {
 	if strings.Contains(out, "Static Analysis") {
 		t.Fatalf("expected redundant static credential finding to be suppressed, got:\n%s", out)
 	}
+	if !containsAll(out, "Signals", "credential-access", "file-read: CREDENTIAL_READ: /home/node/.ssh/id_rsa") {
+		t.Fatalf("expected transparent credential signal, got:\n%s", out)
+	}
+	if strings.Contains(strings.ToLower(out), "confidence") {
+		t.Fatalf("legacy confidence score leaked into human report:\n%s", out)
+	}
 }
 
 func TestFormatHumanReportProbeSummaryCleanWhenNoInstallRisk(t *testing.T) {
 	findings := []Finding{
 		{Severity: SeverityInfo, Type: "runtime", ReasonCode: "RUNTIME_METADATA", Evidence: "phase=probe"},
 	}
-	out := FormatHumanReport(findings, ReportMeta{Command: "npm install lodash"}, VerdictClean, 90)
+	out := FormatHumanReport(findings, ReportMeta{Command: "npm install lodash"}, VerdictClean)
 	if !strings.Contains(out, "Runtime import probe completed without suspicious behavior") {
 		t.Fatalf("expected clean probe summary, got:\n%s", out)
 	}
@@ -39,7 +45,7 @@ func TestFormatHumanReportPrivilegeAttemptIsInstallWarning(t *testing.T) {
 	findings := []Finding{
 		{Severity: SeverityWarning, Type: "privilege", ReasonCode: "PRIVILEGE_ESCALATION_ATTEMPT", Path: "setuid(0) = -1 EPERM (Operation not permitted)", Evidence: "[install]"},
 	}
-	out := FormatHumanReport(findings, ReportMeta{Command: "npm install ./attempt"}, VerdictSuspicious, 62)
+	out := FormatHumanReport(findings, ReportMeta{Command: "npm install ./attempt"}, VerdictSuspicious)
 	if !containsAll(out,
 		"Install-Time Warnings",
 		"PRIVILEGE ESCALATION ATTEMPT: setuid(0) = -1 EPERM (Operation not permitted)",
@@ -55,7 +61,7 @@ func TestFormatHumanReportPrivilegeEscalationIsInstallCritical(t *testing.T) {
 	findings := []Finding{
 		{Severity: SeverityCritical, Type: "privilege", ReasonCode: "PRIVILEGE_ESCALATION", Path: "setuid(0) = 0", Evidence: "[install]"},
 	}
-	out := FormatHumanReport(findings, ReportMeta{Command: "npm install ./evil"}, VerdictMalicious, 80)
+	out := FormatHumanReport(findings, ReportMeta{Command: "npm install ./evil"}, VerdictMalicious)
 	if !containsAll(out,
 		"Install-Time Behavior (observed in sandbox)",
 		"PRIVILEGE ESCALATION: setuid(0) = 0",
@@ -68,7 +74,7 @@ func TestFormatHumanReportAccountFileAccessIsPrivilegeBehavior(t *testing.T) {
 	findings := []Finding{
 		{Severity: SeverityCritical, Type: "privilege", ReasonCode: "ACCOUNT_FILE_ACCESS", Path: "/etc/shadow", Evidence: "[install]"},
 	}
-	out := FormatHumanReport(findings, ReportMeta{Command: "npm install ./evil"}, VerdictMalicious, 80)
+	out := FormatHumanReport(findings, ReportMeta{Command: "npm install ./evil"}, VerdictMalicious)
 	if !containsAll(out,
 		"During install, the target accessed Unix account files such as /etc/passwd or /etc/shadow.",
 		"PRIVILEGE-SENSITIVE ACCOUNT FILE ACCESS: /etc/shadow",
@@ -83,12 +89,12 @@ func TestFormatHumanReportStyledAnsiToggle(t *testing.T) {
 	}
 	meta := ReportMeta{Command: "npm install ./evil"}
 
-	outWithColor := FormatHumanReportStyled(findings, meta, VerdictMalicious, 100, HumanReportStyle{Color: true})
+	outWithColor := FormatHumanReportStyled(findings, meta, VerdictMalicious, HumanReportStyle{Color: true})
 	if !strings.Contains(outWithColor, "\x1b[") {
 		t.Fatalf("expected ANSI escapes in colorized output, got:\n%s", outWithColor)
 	}
 
-	outWithoutColor := FormatHumanReportStyled(findings, meta, VerdictMalicious, 100, HumanReportStyle{Color: false})
+	outWithoutColor := FormatHumanReportStyled(findings, meta, VerdictMalicious, HumanReportStyle{Color: false})
 	if strings.Contains(outWithoutColor, "\x1b[") {
 		t.Fatalf("did not expect ANSI escapes in non-color output, got:\n%s", outWithoutColor)
 	}

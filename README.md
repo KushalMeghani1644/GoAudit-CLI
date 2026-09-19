@@ -20,8 +20,14 @@ goaudit scan "npm install lodash@4.17.21"
 GoAudit Report
 ────────────────────────────────────────────────────────────────
 Command: npm install lodash@4.17.21
-Verdict: SUSPICIOUS (confidence: 55)
+Verdict: SUSPICIOUS
 Sandbox: gVisor (runsc)
+
+Signals
+   network-exfil
+      - network-connection: EXTERNAL_NETWORK_REGISTRY: registry.npmjs.org
+   suspicious-registry
+      - registry-metadata-flag: NPM_LIFECYCLE_SCRIPTS: npm install lodash@4.17.21
 
 What GoAudit Observed
    1. GoAudit did not collect enough clear behavioral evidence to describe the run.
@@ -42,6 +48,40 @@ Summary: 0 critical (0 install-time, 0 probe, 0 static), 1 warnings, 13 informat
 ```
 
 `lodash` is benign here: the single warning is the expected npm lifecycle-scripts notice, only registry network traffic was observed, and the runtime probe was clean.
+
+With `--ci`, the same evidence is emitted as stable signal categories and raw observations rather than
+an opaque numeric confidence score:
+
+```json
+{
+  "verdict": "SUSPICIOUS",
+  "signals": [
+    {
+      "category": "network-exfil",
+      "observations": [
+        {
+          "kind": "network-connection",
+          "severity": "INFO",
+          "reasonCode": "EXTERNAL_NETWORK_REGISTRY",
+          "host": "registry.npmjs.org",
+          "port": 443
+        }
+      ]
+    },
+    {
+      "category": "suspicious-registry",
+      "observations": [
+        {
+          "kind": "registry-metadata-flag",
+          "severity": "WARNING",
+          "reasonCode": "NPM_LIFECYCLE_SCRIPTS",
+          "path": "npm install lodash@4.17.21"
+        }
+      ]
+    }
+  ]
+}
+```
 
 ## Install
 

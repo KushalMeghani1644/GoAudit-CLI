@@ -16,7 +16,7 @@ var knownRegistryHosts = map[string]bool{
 	"registry.npmmirror.com": true,
 }
 
-func FormatHumanReport(findings []Finding, meta ReportMeta, verdict Verdict, confidence int) string {
+func FormatHumanReport(findings []Finding, meta ReportMeta, verdict Verdict) string {
 	var b strings.Builder
 	title := meta.Command
 	if strings.TrimSpace(title) == "" {
@@ -26,14 +26,7 @@ func FormatHumanReport(findings []Finding, meta ReportMeta, verdict Verdict, con
 	b.WriteString("GoAudit Report\n")
 	b.WriteString(fmt.Sprintf("Command: %s\n", title))
 
-	switch verdict {
-	case VerdictMalicious:
-		b.WriteString(fmt.Sprintf("Verdict: %s (confidence: %d)\n", verdict, confidence))
-	case VerdictSuspicious, VerdictInconclusive:
-		b.WriteString(fmt.Sprintf("Verdict: %s (confidence: %d)\n", verdict, confidence))
-	default:
-		b.WriteString(fmt.Sprintf("Verdict: %s (confidence: %d)\n", verdict, confidence))
-	}
+	b.WriteString(fmt.Sprintf("Verdict: %s\n", verdict))
 
 	if meta.SandboxRuntime == "runsc" {
 		b.WriteString("Sandbox: gVisor (runsc)\n")
@@ -50,6 +43,7 @@ func FormatHumanReport(findings []Finding, meta ReportMeta, verdict Verdict, con
 	}
 
 	displayFindings := suppressRedundantStatic(findings)
+	writeSignalSummary(&b, BuildSignals(displayFindings))
 
 	installCritical, installWarnings := splitInstallDynamic(displayFindings, SeverityCritical), splitInstallDynamic(displayFindings, SeverityWarning)
 	staticCritical, staticWarnings := splitStatic(displayFindings, SeverityCritical), splitStatic(displayFindings, SeverityWarning)
@@ -108,7 +102,7 @@ func FormatHumanReport(findings []Finding, meta ReportMeta, verdict Verdict, con
 	return strings.ReplaceAll(b.String(), "\n", "\r\n")
 }
 
-func FormatHumanReportStyled(findings []Finding, meta ReportMeta, verdict Verdict, confidence int, style HumanReportStyle) string {
+func FormatHumanReportStyled(findings []Finding, meta ReportMeta, verdict Verdict, style HumanReportStyle) string {
 	var b strings.Builder
 	title := meta.Command
 	if strings.TrimSpace(title) == "" {
@@ -133,7 +127,7 @@ func FormatHumanReportStyled(findings []Finding, meta ReportMeta, verdict Verdic
 	default:
 		coloredVerdict = wrapANSI(style, "1;32", string(verdict))
 	}
-	b.WriteString(fmt.Sprintf("Verdict: %s (confidence: %d)\n", coloredVerdict, confidence))
+	b.WriteString(fmt.Sprintf("Verdict: %s\n", coloredVerdict))
 
 	if meta.SandboxRuntime == "runsc" {
 		b.WriteString("Sandbox: gVisor (runsc)\n")
@@ -152,6 +146,7 @@ func FormatHumanReportStyled(findings []Finding, meta ReportMeta, verdict Verdic
 	b.WriteString("\n")
 
 	displayFindings := suppressRedundantStatic(findings)
+	writeSignalSummary(&b, BuildSignals(displayFindings))
 	installCritical, installWarnings := splitInstallDynamic(displayFindings, SeverityCritical), splitInstallDynamic(displayFindings, SeverityWarning)
 	staticCritical, staticWarnings := splitStatic(displayFindings, SeverityCritical), splitStatic(displayFindings, SeverityWarning)
 	probeCritical, probeWarnings := splitProbeDynamic(displayFindings, SeverityCritical), splitProbeDynamic(displayFindings, SeverityWarning)
@@ -228,6 +223,37 @@ func FormatHumanReportStyled(findings []Finding, meta ReportMeta, verdict Verdic
 	}
 
 	return strings.ReplaceAll(b.String(), "\n", "\r\n")
+}
+
+func writeSignalSummary(b *strings.Builder, signals []Signal) {
+	b.WriteString("Signals\n")
+	if len(signals) == 0 {
+		b.WriteString("   None observed.\n")
+		return
+	}
+	for _, signal := range signals {
+		b.WriteString(fmt.Sprintf("   %s\n", signal.Category))
+		for _, observation := range signal.Observations {
+			detail := observation.Path
+			if observation.Host != "" {
+				detail = observation.Host
+				if observation.IP != "" {
+					detail += " (" + observation.IP + ")"
+				}
+				if observation.Port != 0 {
+					detail += fmt.Sprintf(":%d", observation.Port)
+				}
+			}
+			if detail == "" {
+				detail = observation.Evidence
+			}
+			b.WriteString(fmt.Sprintf("      - %s: %s", observation.Kind, observation.ReasonCode))
+			if detail != "" {
+				b.WriteString(": " + detail)
+			}
+			b.WriteString("\n")
+		}
+	}
 }
 
 func writeFindingsListStyled(b *strings.Builder, findings []Finding, style HumanReportStyle) {

@@ -282,7 +282,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 		SuppressExpectedBehavior: isNodeProfile(profile.Name),
 		Dynamic:                  dynamicMetaFromTraceHealth(traceHealth),
 	}
-	verdict, _ := reporter.Report(findings, meta)
+	verdict := reporter.Report(findings, meta)
 	return shouldFailOnVerdict(failOn, verdict), nil
 }
 
