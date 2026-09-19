@@ -10,7 +10,7 @@ Use `goaudit scan` to audit a single npm, pnpm, or bun install command. Use `goa
 
 ## Demo
 
-Real output from `main` in a gVisor (`runsc`) sandbox:
+Representative output from `main` in a gVisor (`runsc`) sandbox:
 
 ```zsh
 goaudit scan "npm install lodash@4.17.21"
@@ -20,7 +20,7 @@ goaudit scan "npm install lodash@4.17.21"
 GoAudit Report
 ────────────────────────────────────────────────────────────────
 Command: npm install lodash@4.17.21
-Verdict: SUSPICIOUS
+Verdict: CLEAN
 Sandbox: gVisor (runsc)
 
 Signals
@@ -30,7 +30,8 @@ Signals
       - registry-metadata-flag: NPM_LIFECYCLE_SCRIPTS: npm install lodash@4.17.21
 
 What GoAudit Observed
-   1. GoAudit did not collect enough clear behavioral evidence to describe the run.
+   1. GoAudit installed and observed the target in a sandbox.
+   2. It did not observe credential reads, persistence writes, suspicious process execution, or unexpected outbound network connections.
 Runtime Probe
    - Runtime import probe completed without suspicious behavior
    - No credential access, suspicious writes, or unknown exfiltration detected during import
@@ -47,14 +48,15 @@ Summary: 0 critical (0 install-time, 0 probe, 0 static), 1 warnings, 13 informat
    Use --ci for full JSON output.
 ```
 
-`lodash` is benign here: the single warning is the expected npm lifecycle-scripts notice, only registry network traffic was observed, and the runtime probe was clean.
+`lodash` is clean here: the single warning is the expected npm lifecycle-scripts notice, only registry network traffic was observed, and the runtime probe was clean. The registry connection may also show a resolved IP address in the report.
 
 With `--ci`, the same evidence is emitted as stable signal categories and raw observations rather than
-an opaque numeric confidence score:
+an opaque numeric confidence score. The CI report also includes runtime diagnostics and metadata; the
+example below shows the stable signal portion (resolved IPs and tool versions vary by run):
 
 ```json
 {
-  "verdict": "SUSPICIOUS",
+  "verdict": "CLEAN",
   "signals": [
     {
       "category": "network-exfil",
@@ -64,7 +66,8 @@ an opaque numeric confidence score:
           "severity": "INFO",
           "reasonCode": "EXTERNAL_NETWORK_REGISTRY",
           "host": "registry.npmjs.org",
-          "port": 443
+          "port": 443,
+          "evidence": "[install]"
         }
       ]
     },
@@ -75,13 +78,18 @@ an opaque numeric confidence score:
           "kind": "registry-metadata-flag",
           "severity": "WARNING",
           "reasonCode": "NPM_LIFECYCLE_SCRIPTS",
-          "path": "npm install lodash@4.17.21"
+          "path": "npm install lodash@4.17.21",
+          "evidence": "npm install may execute lifecycle scripts (preinstall/install/postinstall)"
         }
       ]
     }
   ]
 }
 ```
+
+Signals are grouped by behavior: `credential-access`, `persistence`, `network-exfil`,
+`privilege-escalation`, `execution`, and `suspicious-registry`. Each observation retains its
+severity, reason code, and relevant path, host, or evidence.
 
 ## Install
 
