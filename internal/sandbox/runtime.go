@@ -9,7 +9,7 @@ import (
 )
 
 // NodeSandboxImage is the immutable published sandbox used for gVisor scans.
-const NodeSandboxImage = "ghcr.io/kushalmeghani1644/goaudit-node-sandbox:latest@sha256:dc6167f2291b00f545b78c1c74802e4d2b4f94ae9e92062cb49c86343f16720c"
+const NodeSandboxImage = "ghcr.io/kushalmeghani1644/goaudit-node-sandbox:sha-0ee47d6@sha256:0686cf4328eaf75654ae8a2180bc8acb19460a7fc90f1b86483f3939e8f782d4"
 
 // GVisorSetupURL documents how to install and register runsc with Docker.
 const GVisorSetupURL = "https://github.com/KushalMeghani1644/GoAudit-CLI#gvisor-runsc-on-fedora--selinux"
