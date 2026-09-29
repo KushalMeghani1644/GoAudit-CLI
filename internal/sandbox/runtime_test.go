@@ -20,7 +20,20 @@ func TestRuntimeFromDockerInfo(t *testing.T) {
 	}
 }
 
-func TestNodeSandboxImageUsesGHCR(t *testing.T) {
+func TestDefaultImagesArePinnedByDigest(t *testing.T) {
+	images := map[string]string{
+		"published Node sandbox": NodeSandboxImage,
+		"default Node":           DefaultNodeImage,
+		"default Bun":            DefaultBunImage,
+	}
+	for name, image := range images {
+		t.Run(name, func(t *testing.T) {
+			parts := strings.Split(image, "@sha256:")
+			if len(parts) != 2 || len(parts[1]) != 64 {
+				t.Fatalf("image is not pinned by a sha256 digest: %s", image)
+			}
+		})
+	}
 	if !strings.HasPrefix(NodeSandboxImage, "ghcr.io/kushalmeghani1644/goaudit-node-sandbox:") {
 		t.Fatalf("unexpected node sandbox image: %s", NodeSandboxImage)
 	}

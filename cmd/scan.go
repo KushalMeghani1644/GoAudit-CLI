@@ -9,6 +9,7 @@ import (
 	"github.com/KushalMeghani1644/GoAudit-CLI/internal/analyzer"
 	"github.com/KushalMeghani1644/GoAudit-CLI/internal/project"
 	"github.com/KushalMeghani1644/GoAudit-CLI/internal/report"
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/sandbox"
 	"github.com/spf13/cobra"
 )
 
@@ -198,8 +199,8 @@ func init() {
 	scanCmd.Flags().BoolVar(&ciMode, "ci", false, "Output JSON for CI integration")
 	scanCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show live findings during scan (default: only final report)")
 	scanCmd.Flags().BoolVar(&offlineMode, "offline", false, "Disable npm registry requests during static analysis")
-	scanCmd.Flags().StringVar(&nodeImage, "node-image", "node:current-slim", "Node.js image used for npm/pnpm scans")
-	scanCmd.Flags().StringVar(&bunImage, "bun-image", "oven/bun:1", "Bun image used for bun scans")
+	scanCmd.Flags().StringVar(&nodeImage, "node-image", sandbox.DefaultNodeImage, "Node.js image used for npm/pnpm scans")
+	scanCmd.Flags().StringVar(&bunImage, "bun-image", sandbox.DefaultBunImage, "Bun image used for bun scans")
 	scanCmd.Flags().StringVar(&networkMode, "network", "auto", "Network policy: auto (based on command type), on, or off")
 	scanCmd.Flags().BoolVar(&skipProbe, "skip-probe", false, "Skip runtime behavior probe after install")
 	scanCmd.Flags().BoolVar(&noCache, "no-cache", false, "Disable sandbox caching for this run (no warm container is stored)")
