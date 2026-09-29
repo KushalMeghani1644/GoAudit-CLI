@@ -270,7 +270,7 @@ docker info | rg -i runtimes
 
 **SELinux:** gVisor cannot use Docker's default container SELinux labels. GoAudit sets `--security-opt label=disable` automatically for `runsc` containers.
 
-**Node sandbox image:** when you keep the default `--node-image`, GoAudit uses `ghcr.io/kushalmeghani1644/goaudit-node-sandbox:latest` for Node-based scans.
+**Node sandbox image:** when you keep the default `--node-image`, GoAudit uses a digest-pinned, multi-platform `ghcr.io/kushalmeghani1644/goaudit-node-sandbox` image for Node-based scans.
 
 GoAudit never falls back to `runc`. If runtime verification or sandbox preparation fails, the scan stops rather than silently weakening isolation.
 

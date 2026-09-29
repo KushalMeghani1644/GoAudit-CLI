@@ -8,17 +8,17 @@ import (
 	"github.com/docker/docker/client"
 )
 
-// NodeSandboxImage is the published Node sandbox image used for gVisor scans.
-const NodeSandboxImage = "ghcr.io/kushalmeghani1644/goaudit-node-sandbox:latest"
+// NodeSandboxImage is the immutable published sandbox used for gVisor scans.
+const NodeSandboxImage = "ghcr.io/kushalmeghani1644/goaudit-node-sandbox:sha-0ee47d6@sha256:0686cf4328eaf75654ae8a2180bc8acb19460a7fc90f1b86483f3939e8f782d4"
 
 // GVisorSetupURL documents how to install and register runsc with Docker.
 const GVisorSetupURL = "https://github.com/KushalMeghani1644/GoAudit-CLI#gvisor-runsc-on-fedora--selinux"
 
-// DefaultNodeImage is the stock Node image used to identify the default Node profile.
-const DefaultNodeImage = "node:current-slim"
+// DefaultNodeImage is the immutable stock Node image used by the default Node profile.
+const DefaultNodeImage = "node:current-slim@sha256:ec7758ee051e457b468b32bde57b0879010b325bb9862718e9615225ce4aaae1"
 
-// DefaultBunImage is the stock Bun image used to identify the default Bun profile.
-const DefaultBunImage = "oven/bun:1"
+// DefaultBunImage is the immutable stock Bun image used by the default Bun profile.
+const DefaultBunImage = "oven/bun:1@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895"
 
 // RuntimeFromDockerInfo returns "runsc" only when Docker has registered that runtime.
 func RuntimeFromDockerInfo(runtimes map[string]system.RuntimeWithStatus) string {

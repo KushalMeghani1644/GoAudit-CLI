@@ -7,11 +7,12 @@ import (
 	"testing"
 
 	"github.com/KushalMeghani1644/GoAudit-CLI/internal/parser"
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/sandbox"
 )
 
 func TestInferProfileForPackageManagers(t *testing.T) {
-	nodeImage = "node:current-slim"
-	bunImage = "oven/bun:1"
+	nodeImage = sandbox.DefaultNodeImage
+	bunImage = sandbox.DefaultBunImage
 
 	npm := inferProfile("npm install lodash")
 	if npm.Name != "npm" || npm.Image != nodeImage {
@@ -71,16 +72,16 @@ func TestValidateInstallCommandRejectsNonJavaScriptAndShellCommands(t *testing.T
 }
 
 func TestShouldUsePublishedNodeSandbox(t *testing.T) {
-	if !shouldUsePublishedNodeSandbox("runsc", scanProfile{Name: "npm", Image: "node:current-slim"}) {
+	if !shouldUsePublishedNodeSandbox("runsc", scanProfile{Name: "npm", Image: sandbox.DefaultNodeImage}) {
 		t.Fatal("expected default npm runsc scan to use published sandbox image")
 	}
 	if shouldUsePublishedNodeSandbox("runsc", scanProfile{Name: "npm", Image: "custom/node:latest"}) {
 		t.Fatal("expected custom node image to be preserved")
 	}
-	if shouldUsePublishedNodeSandbox("", scanProfile{Name: "npm", Image: "node:current-slim"}) {
+	if shouldUsePublishedNodeSandbox("", scanProfile{Name: "npm", Image: sandbox.DefaultNodeImage}) {
 		t.Fatal("expected an unspecified runtime to keep the stock node image")
 	}
-	if shouldUsePublishedNodeSandbox("runsc", scanProfile{Name: "other", Image: "node:current-slim"}) {
+	if shouldUsePublishedNodeSandbox("runsc", scanProfile{Name: "other", Image: sandbox.DefaultNodeImage}) {
 		t.Fatal("expected non-node profile to keep its image")
 	}
 }

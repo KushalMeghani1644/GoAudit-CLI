@@ -1,6 +1,7 @@
 # Sandbox image for GoAudit npm/pnpm scans under gVisor (runsc).
 # Build with runc (host docker build); scan with runsc — no runtime apt-get needed.
-FROM node:current-slim
+FROM oven/bun:1@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS bun
+FROM node:current-slim@sha256:ec7758ee051e457b468b32bde57b0879010b325bb9862718e9615225ce4aaae1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -9,11 +10,10 @@ RUN apt-get update \
       strace curl ca-certificates dnsutils rsync unzip \
  && rm -rf /var/lib/apt/lists/*
 
-# Install pnpm globally.
-RUN npm install -g pnpm
-
-# Install bun globally so it is available for all users.
-RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
+# Pin package-manager binaries so rebuilding this image cannot silently change them.
+RUN npm install -g pnpm@9.15.9 \
+ && test "$(pnpm --version)" = "9.15.9"
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 
 # Pre-create honeypot directories for both root and uid-1000 user.
 # gVisor cannot mkdir dotfile dirs at runtime, so they must exist in the image.
