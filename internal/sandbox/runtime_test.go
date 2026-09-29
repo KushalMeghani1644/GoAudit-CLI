@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -31,6 +32,9 @@ func TestDefaultImagesArePinnedByDigest(t *testing.T) {
 			parts := strings.Split(image, "@sha256:")
 			if len(parts) != 2 || len(parts[1]) != 64 {
 				t.Fatalf("image is not pinned by a sha256 digest: %s", image)
+			}
+			if _, err := hex.DecodeString(parts[1]); err != nil {
+				t.Fatalf("image has a non-hexadecimal sha256 digest: %s", image)
 			}
 		})
 	}

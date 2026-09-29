@@ -19,6 +19,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -44,6 +47,7 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.node-sandbox
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -55,14 +59,19 @@ jobs:
           set -euo pipefail
           while IFS= read -r image; do
             [ -n "$image" ] || continue
-            docker pull "$image"
-            docker run --rm "$image" sh -lc '
-              set -eu
-              for bin in bash node npm pnpm bun strace curl rsync dig; do
-                command -v "$bin" >/dev/null 2>&1 || { echo "missing $bin"; exit 1; }
-              done
-              test -f /etc/ssl/certs/ca-certificates.crt || { echo "missing ca-certificates"; exit 1; }
-            '
+            for platform in linux/amd64 linux/arm64; do
+              docker buildx imagetools inspect --raw "$image" |
+                jq -e --arg os "${platform%/*}" --arg arch "${platform#*/}" \
+                  'any(.manifests[]; .platform.os == $os and .platform.architecture == $arch)' >/dev/null
+              docker pull --platform "$platform" "$image"
+              docker run --rm --platform "$platform" "$image" sh -lc '
+                set -eu
+                for bin in bash node npm pnpm bun strace curl rsync dig; do
+                  command -v "$bin" >/dev/null 2>&1 || { echo "missing $bin"; exit 1; }
+                done
+                test -f /etc/ssl/certs/ca-certificates.crt || { echo "missing ca-certificates"; exit 1; }
+              '
+            done
           done <<EOF
           $SANDBOX_TAGS
           EOF
