@@ -15,7 +15,7 @@ func TestFormatHumanReportSplitsInstallAndStatic(t *testing.T) {
 	if !containsAll(out,
 		"Install-Time Behavior (observed in sandbox)",
 		"CREDENTIAL THEFT: /home/node/.ssh/id_rsa",
-		"Runtime import probe completed without re-triggering malicious behavior",
+		"No additional suspicious behavior observed in runtime exercises",
 		"Malicious activity was already observed during install-time sandbox tracing",
 	) {
 		t.Fatalf("expected split install/static report, got:\n%s", out)
@@ -36,7 +36,7 @@ func TestFormatHumanReportProbeSummaryCleanWhenNoInstallRisk(t *testing.T) {
 		{Severity: SeverityInfo, Type: "runtime", ReasonCode: "RUNTIME_METADATA", Evidence: "phase=probe"},
 	}
 	out := FormatHumanReport(findings, ReportMeta{Command: "npm install lodash"}, VerdictClean)
-	if !strings.Contains(out, "Runtime import probe completed without suspicious behavior") {
+	if !strings.Contains(out, "No suspicious behavior observed in bounded runtime exercises") {
 		t.Fatalf("expected clean probe summary, got:\n%s", out)
 	}
 }

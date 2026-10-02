@@ -108,3 +108,11 @@ jobs:
 
       - name: Test privilege escalation fixtures
         run: ./scripts/test-privilege-escalation-e2e.sh
+
+      - name: Test opt-in runtime probe fixtures
+        run: ./scripts/test-runtime-probe-e2e.sh
+
+      - name: Test cached runtime probe execution
+        env:
+          GOAUDIT_TEST_NODE_IMAGE: goaudit-node-sandbox:ci
+        run: go test -tags integration -run TestRuntimeProbe -v ./internal/sandbox

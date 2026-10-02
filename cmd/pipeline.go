@@ -22,7 +22,6 @@ type pipelineOptions struct {
 	allowNetwork    bool
 	scanProjectMode bool
 	probePackages   []string
-	skipProbe       bool
 	targetTimeout   string
 	probeTimeout    string
 }
@@ -112,7 +111,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 	}
 
 	probeScript := ""
-	if len(opts.probePackages) > 0 && !opts.skipProbe && isNodeProfile(profile.Name) {
+	if len(opts.probePackages) > 0 && isNodeProfile(profile.Name) {
 		probeScript = probe.GenerateNodeProbeScript(opts.probePackages, probeTimeoutSeconds(opts.probeTimeout))
 	}
 	if opts.targetTimeout == "" {
@@ -402,7 +401,7 @@ func runSandboxAndParse(
 	registryIPs map[string]string,
 	reporter *report.Reporter,
 ) ([]report.Finding, string, parser.TraceHealth, error) {
-	if len(opts.probePackages) > 0 && !opts.skipProbe {
+	if probeScript != "" {
 		reporter.UpdateProgress(fmt.Sprintf("Running in sandbox + probing %d package(s)...", len(opts.probePackages)))
 	}
 
@@ -419,7 +418,7 @@ func runSandboxAndParse(
 
 	dynamicFindings, traceHealth, err := parser.ParseStreamWithHealth(logStream, reporter, parser.ParseOptions{
 		KnownRegistryIPs: registryIPs,
-		ProbeExpected:    len(opts.probePackages) > 0 && !opts.skipProbe,
+		ProbeExpected:    probeScript != "",
 	})
 	if err != nil {
 		return nil, "", traceHealth, err
@@ -439,7 +438,7 @@ func runCachedSandboxAndParse(
 	registryIPs map[string]string,
 	reporter *report.Reporter,
 ) ([]report.Finding, string, parser.TraceHealth, error) {
-	if len(opts.probePackages) > 0 && !opts.skipProbe {
+	if probeScript != "" {
 		reporter.UpdateProgress(fmt.Sprintf("Running in cached sandbox + probing %d package(s)...", len(opts.probePackages)))
 	}
 
@@ -450,7 +449,7 @@ func runCachedSandboxAndParse(
 
 	dynamicFindings, traceHealth, err := parser.ParseStreamWithHealth(logStream, reporter, parser.ParseOptions{
 		KnownRegistryIPs: registryIPs,
-		ProbeExpected:    len(opts.probePackages) > 0 && !opts.skipProbe,
+		ProbeExpected:    probeScript != "",
 	})
 	if err != nil {
 		return nil, "", traceHealth, err

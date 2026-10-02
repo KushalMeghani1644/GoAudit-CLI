@@ -15,7 +15,6 @@ run_fixture() {
   trap 'rm -f "$output"' RETURN
   "$CLI" scan "npm install --userconfig=/dev/null ./$FIXTURES/$fixture" \
     --ci \
-    --skip-probe \
     --no-cache \
     --network=off \
     --node-image="$IMAGE" >"$output"

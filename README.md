@@ -10,10 +10,10 @@ Use `goaudit scan` to audit a single npm, pnpm, or bun install command. Use `goa
 
 ## Demo
 
-Representative output from `main` in a gVisor (`runsc`) sandbox:
+Representative output with runtime probing explicitly enabled in a gVisor (`runsc`) sandbox (exact findings and counts vary by run):
 
 ```zsh
-goaudit scan "npm install lodash@4.17.21"
+goaudit scan "npm install lodash@4.17.21" --runtime-probe
 ```
 
 ```text
@@ -33,8 +33,13 @@ What GoAudit Observed
    1. GoAudit installed and observed the target in a sandbox.
    2. It did not observe credential reads, persistence writes, suspicious process execution, or unexpected outbound network connections.
 Runtime Probe
-   - Runtime import probe completed without suspicious behavior
-   - No credential access, suspicious writes, or unknown exfiltration detected during import
+   - No suspicious behavior observed in bounded runtime exercises
+   - PROBE_SOURCE_SCAN: lodash:truncated
+   - PROBE_IMPORT_OK: lodash
+   - PROBE_API_OK: lodash:chunk
+   - PROBE_OBSERVATION_COMPLETE: lodash:1000ms
+   - PROBE_COVERAGE: lodash:complete
+   - Sampling is not a safety guarantee: arbitrary APIs, long delays, and application-specific paths remain untested
 
 Static Warnings
 ────────────────────────────────────────────────────────────────
@@ -44,11 +49,11 @@ Static Warnings
 Network Activity (expected)
    - 1 connection(s) to registry.npmjs.org (registry)
    - 1 connection(s) to 1 host(s)
-Summary: 0 critical (0 install-time, 0 probe, 0 static), 1 warnings, 13 informational
+Summary: 0 critical (0 install-time, 0 probe, 0 static), 1 warnings, 17 informational
    Use --ci for full JSON output.
 ```
 
-`lodash` is clean here: the single warning is the expected npm lifecycle-scripts notice, only registry network traffic was observed, and the runtime probe was clean. The registry connection may also show a resolved IP address in the report.
+The observed verdict for `lodash` is clean here: the single warning is the expected npm lifecycle-scripts notice and only registry network traffic was observed. This is not a guarantee that every import or application path is safe. The registry connection may also show a resolved IP address in the report.
 
 With `--ci`, the same evidence is emitted as stable signal categories and raw observations rather than
 an opaque numeric confidence score. The CI report also includes runtime diagnostics and metadata; the
@@ -123,7 +128,10 @@ GoAudit requires Docker to have the gVisor `runsc` runtime registered. It refuse
 goaudit scan "npm install lodash"
 goaudit scan "pnpm add <package>"
 goaudit scan "bun add <package>"
+goaudit scan "npm install lodash" --runtime-probe
 ```
+
+By default, GoAudit performs static checks and traces the sandbox install, including lifecycle scripts. Post-install runtime probing is **off by default**; opt in with `--runtime-probe`.
 
 Common flags (both `scan` and `scan-project` unless noted):
 
@@ -133,7 +141,8 @@ Common flags (both `scan` and `scan-project` unless noted):
 | `--verbose` | Live findings during the scan |
 | `--offline` | Skip host-side npm registry requests |
 | `--network auto\|on\|off` | Sandbox network policy (see [Network policy](#network-policy)) |
-| `--skip-probe` | Skip the post-install runtime probe |
+| `--runtime-probe` | Opt in to post-install runtime probing (default: off) |
+| `--skip-probe` | Deprecated compatibility no-op; probing is already off by default |
 | `--fail-on` | Exit non-zero on `malicious`, `inconclusive`, or both (default: `never`) |
 | `--warm-cache` | Prepare the sandbox without running a scan |
 | `--no-cache` | Do not store a warm container after this run |
@@ -159,8 +168,8 @@ goaudit scan-project ~/mywebsite --upgrade-mode ncu
 goaudit scan-project ~/monorepo --upgrade-mode update --ci
 goaudit scan-project ~/app --manager pnpm
 goaudit scan-project ~/app --include-transitive
-goaudit scan-project ~/app --probe-all
-goaudit scan-project ~/app --skip-probe
+goaudit scan-project ~/app --runtime-probe
+goaudit scan-project ~/app --include-transitive --runtime-probe
 goaudit scan-project ~/app --mount-project
 ```
 
@@ -178,8 +187,7 @@ Project-only flags:
 |------|---------|
 | `--upgrade-mode` | `refresh-lock`, `ncu`, or `update` |
 | `--manager` | Force `npm`, `pnpm`, or `bun` |
-| `--include-transitive` | Also registry-check packages listed in the manager's lockfile (`package-lock.json`, `pnpm-lock.yaml`, or `bun.lock`) |
-| `--probe-all` | Probe all direct dependencies at runtime, not only suspicious ones |
+| `--include-transitive` | Also registry-check packages listed in the manager's lockfile (`package-lock.json`, `pnpm-lock.yaml`, or `bun.lock`); does not expand runtime probe scope |
 | `--mount-project` | Stage the full project tree (secret paths redacted) instead of manifests/lockfiles only |
 
 ### Package manager support
@@ -193,7 +201,7 @@ Project-only flags:
 | yarn | No | No |
 | Arbitrary shell commands | No | No |
 
-**npm, pnpm, and bun** get the full workflow: npm registry metadata checks, sandbox install tracing, and a Node runtime probe after install.
+**npm, pnpm, and bun** get npm registry metadata checks and sandbox install tracing, plus an optional Node runtime probe after install when `--runtime-probe` is enabled.
 
 **yarn** is not supported. There is no Yarn sandbox profile, so `goaudit scan yarn install` will not run a meaningful install. Yarn projects (`yarn.lock`) are rejected by `scan-project`. Convert to npm, pnpm, or bun if you need project-level scanning.
 
@@ -211,16 +219,39 @@ Use `--network on` or `--network off` to override. Combine with `--offline` to b
 
 ### Runtime probe
 
-After a JavaScript install, GoAudit optionally loads each package entrypoint (`require` / dynamic `import`) and runs package CLI `bin` entries with `--help` under strace. This applies to npm, pnpm, and bun only.
+Runtime probing is **off by default** for both scan commands. Pass `--runtime-probe` to request a post-install probe under strace. This applies to npm, pnpm, and bun installs; the probe uses Node, not Bun's native runtime.
 
-| Command | Default probe scope |
+The controller exercises each selected package in an isolated Node process, loading its entrypoint (`require` / dynamic `import`). It also runs declared CLI `bin` entries with `--help`, rejecting paths outside the package root. A one-second post-load observation window allows short delayed behavior to execute naturally when the timeout budget permits.
+
+Known packages get deterministic API exercises; arbitrary exports are never called:
+
+| Package | API exercise |
+|---------|--------------|
+| lodash | `chunk([1, 2, 3], 2)` |
+| yaml | `parse("goaudit: true")` |
+| minimist | Parse `["--goaudit", "true"]` |
+| marked | `parse("# GoAudit")` |
+
+The probe also inspects up to 256 KiB of a resolved JavaScript entrypoint for nearby decode-to-execute patterns (base64/`atob` with `eval`/`new Function`). These are suspicious indicators, **not proof of malware**. This heuristic can flag comments, strings, or unrelated nearby operations; it is not a recursive source scan or deobfuscator. Import-only entrypoints that cannot be resolved for inspection are reported as unsupported.
+
+| Command | Scope with `--runtime-probe` |
 |---------|---------------------|
 | `scan` | Packages named in the install command |
-| `scan-project` | Packages with suspicious registry findings only |
+| `scan-project` | All direct dependencies from project manifests, including development, optional, and workspace package dependencies |
 
-Use `--probe-all` with `scan-project` to probe every direct dependency. Use `--skip-probe` to disable probing.
+Project probing is not restricted to packages with suspicious registry findings. `--include-transitive` expands **static registry checks only**, not runtime probing. Neither command automatically probes all transitive dependencies; a selected package can still load its own dependencies during execution. A command such as `scan "npm install"` names no packages and therefore selects none for probing.
 
-The probe does **not** exercise delayed timers, workers, interactive prompts, or arbitrary exported APIs.
+Compatibility: `--probe-all` has been removed and is an unknown flag; replace it with `--runtime-probe`. `--skip-probe` remains accepted as a deprecated no-op so existing default-off invocations keep working. Passing both `--runtime-probe` and `--skip-probe` as true is an error; an explicit `--skip-probe=false` does not conflict.
+
+`--probe-timeout` remains available (default: `30s`). One shared deadline is divided among selected packages and their exercises. A hanging package is terminated without preventing later packages from being attempted. Ordinary descendant process groups are cleaned up on exit and timeout; deliberately detached processes remain the sandbox's responsibility.
+
+Human and JSON reports distinguish successful exercises, unsupported adapters, source inspection, and incomplete observation. Exercise failures or incomplete runtime coverage produce `INCONCLUSIVE`, unless observed malicious behavior takes precedence; install findings remain available. An unsupported adapter alone does not fail the scan.
+
+Package installation, import, and CLI stdout/stderr are not parsed as diagnostics. Only controller records, restricted harness IPC diagnostics, and syscall evidence reach the report stream. This prevents package output from forging coverage or source-inspection records; it does not make the shared worker JavaScript realm tamper-proof.
+
+Probing is bounded sampling, not a full application test: it cannot cover arbitrary exported APIs, interactive workflows, persistent CLI activity after exit, or all delayed activity. A clean probe does not establish that a package is safe, and default-off scans provide no post-install probe coverage. Install-time tracing still runs without this opt-in.
+
+See [the KUS-54 decision and benchmark](docs/runtime-probe-decision.md) and [probe implementation notes](internal/probe/README.md).
 
 ### Project staging
 

@@ -32,7 +32,13 @@ var reasonExplanations = map[string]Explanation{
 	"CREDENTIAL_READ_WITH_OUTBOUND":  {"Credential Access With Outbound Connection", "Read credential-like files and opened a non-registry connection; data transmission was not proven"},
 	"VERSION_RESOLUTION_APPROXIMATE": {"Approximate Version Analysis", "Static analysis used dist-tags.latest because the install spec was a range or unresolved tag"},
 	"PACKAGE_PARSE_INCOMPLETE":       {"Package Command Parse Incomplete", "Could not extract package specs from a package-manager command (quoting, pipes, or wrappers)"},
-	"PROBE_LIMITATION":               {"Runtime Probe Limitation", "Runtime probe only loads package entrypoints and optional CLI --help; delayed or input-driven paths are not exercised"},
+	"PROBE_LIMITATION":               {"Runtime Probe Limitation", "Bounded entrypoint, CLI, selected API, and short-delay sampling does not cover arbitrary APIs or application-specific behavior"},
+	"PROBE_OBFUSCATION":              {"Source Obfuscation Indicator", "Bounded entrypoint inspection found decode-to-execute code; this is suspicious, not proof of malware"},
+	"PROBE_IMPORT_FAILED":            {"Runtime Import Incomplete", "Package could not be loaded in the generic Node harness"},
+	"PROBE_API_FAILED":               {"Runtime API Exercise Incomplete", "A supported API adapter did not complete"},
+	"PROBE_BIN_FAIL":                 {"Runtime CLI Exercise Incomplete", "A declared bin failed, was missing, or escaped the package root"},
+	"PROBE_PACKAGE_TIMEOUT":          {"Runtime Package Budget Exceeded", "A package exercise did not finish within its bounded budget"},
+	"PROBE_OBSERVATION_INCOMPLETE":   {"Runtime Observation Incomplete", "The short post-load observation window did not finish"},
 
 	// Warning — dynamic (strace)
 	"EXTERNAL_NETWORK":          {"Unknown Network Connection", "Connected to a host that isn't a known package registry"},
