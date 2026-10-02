@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/KushalMeghani1644/GoAudit-CLI/internal/analyzer"
 	"github.com/KushalMeghani1644/GoAudit-CLI/internal/project"
@@ -17,7 +16,6 @@ var (
 	upgradeMode       string
 	managerOverride   string
 	includeTransitive bool
-	probeAll          bool
 	mountProject      bool
 	// failOn is defined in scan.go (shared across scan commands).
 )
@@ -30,9 +28,10 @@ var suppressedProjectReasons = map[string]bool{
 }
 
 var scanProjectCmd = &cobra.Command{
-	Use:   "scan-project <path>",
-	Short: "Scan a JS project by upgrading and installing dependencies in a sandbox",
-	Args:  cobra.ExactArgs(1),
+	Use:     "scan-project <path>",
+	Short:   "Scan a JS project by upgrading and installing dependencies in a sandbox",
+	Args:    cobra.ExactArgs(1),
+	PreRunE: validateRuntimeProbeFlags,
 	Run: func(cmd *cobra.Command, args []string) {
 		mode, err := project.ParseUpgradeMode(upgradeMode)
 		if err != nil {
@@ -82,33 +81,11 @@ var scanProjectCmd = &cobra.Command{
 			reporter.PrintLiveFinding(f)
 		}
 
-		// Determine which packages to probe at runtime.
-		var probePackages []string
-		if !skipProbe {
-			if probeAll {
-				probePackages = deps
-			} else {
-				// Probe only packages that had suspicious static findings.
-				suspicious := map[string]bool{}
-				for _, f := range registryFindings {
-					if f.Severity == report.SeverityWarning || f.Severity == report.SeverityCritical {
-						name := extractFindingPackageName(f.Path)
-						if name != "" {
-							suspicious[name] = true
-						}
-					}
-				}
-				for pkg := range suspicious {
-					probePackages = append(probePackages, pkg)
-				}
-				if len(probePackages) == 0 {
-					if !ciMode {
-						fmt.Println("No suspicious packages from registry checks; skipping runtime probe (use --probe-all to probe all deps)")
-					}
-				} else if !ciMode {
-					fmt.Printf("Probing %d suspicious package(s) at runtime\n", len(probePackages))
-				}
-			}
+		// Runtime selection is independent of registry findings and transitive
+		// static checks: opting in probes direct dependencies only.
+		probePackages := projectProbePackages(proj, runtimeProbe)
+		if runtimeProbe && !ciMode {
+			fmt.Printf("Selected %d direct dependency package(s) for runtime probing\n", len(probePackages))
 		}
 
 		// Stage a sanitized tree so install scripts cannot read real project secrets
@@ -138,7 +115,6 @@ var scanProjectCmd = &cobra.Command{
 				projectPath:     proj.Root,
 				scanProjectMode: true,
 				probePackages:   probePackages,
-				skipProbe:       skipProbe,
 			})
 			stage.Cleanup()
 			if err != nil {
@@ -153,7 +129,6 @@ var scanProjectCmd = &cobra.Command{
 			priorFindings:   findings,
 			scanProjectMode: true,
 			probePackages:   probePackages,
-			skipProbe:       skipProbe,
 			targetTimeout:   targetTimeout,
 			probeTimeout:    probeTimeout,
 		})
@@ -167,25 +142,11 @@ var scanProjectCmd = &cobra.Command{
 	},
 }
 
-// extractFindingPackageName extracts a bare package name from a finding path
-// which may be "pkg@version", "@scope/pkg@version", or just "pkg".
-func extractFindingPackageName(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return ""
+func projectProbePackages(proj *project.Project, enabled bool) []string {
+	if !enabled {
+		return nil
 	}
-	// Handle @scope/pkg@version or @scope/pkg
-	if strings.HasPrefix(path, "@") {
-		if idx := strings.LastIndex(path, "@"); idx > 0 {
-			return path[:idx]
-		}
-		return path
-	}
-	// Handle pkg@version
-	if idx := strings.Index(path, "@"); idx > 0 {
-		return path[:idx]
-	}
-	return path
+	return proj.ListDirectDeps()
 }
 
 func init() {
@@ -195,11 +156,10 @@ func init() {
 	scanProjectCmd.Flags().StringVar(&nodeImage, "node-image", sandbox.DefaultNodeImage, "Node.js image used for npm/pnpm scans")
 	scanProjectCmd.Flags().StringVar(&bunImage, "bun-image", sandbox.DefaultBunImage, "Bun image used for bun scans")
 	scanProjectCmd.Flags().StringVar(&networkMode, "network", "auto", "Network policy: auto (based on command type), on, or off")
-	scanProjectCmd.Flags().BoolVar(&skipProbe, "skip-probe", false, "Skip runtime behavior probe after install")
+	addRuntimeProbeFlags(scanProjectCmd, "all direct dependencies")
 	scanProjectCmd.Flags().BoolVar(&warmCache, "warm-cache", false, "Prepare and cache the sandbox without running a scan")
-	scanProjectCmd.Flags().BoolVar(&probeAll, "probe-all", false, "Probe all direct dependencies, not just suspicious ones")
 	scanProjectCmd.Flags().StringVar(&targetTimeout, "timeout", "", "Maximum time for the install/target command (default: profile-based)")
-	scanProjectCmd.Flags().StringVar(&probeTimeout, "probe-timeout", "30s", "Maximum time for runtime import probe")
+	scanProjectCmd.Flags().StringVar(&probeTimeout, "probe-timeout", "30s", "Maximum time for runtime probe")
 	scanProjectCmd.Flags().StringVar(&upgradeMode, "upgrade-mode", "refresh-lock", "Upgrade strategy: refresh-lock, ncu, or update")
 	scanProjectCmd.Flags().StringVar(&managerOverride, "manager", "", "Force package manager: npm, pnpm, or bun")
 	scanProjectCmd.Flags().BoolVar(&includeTransitive, "include-transitive", false, "Also registry-check packages from the manager's lockfile (package-lock.json, pnpm-lock.yaml, or bun.lock)")
