@@ -69,3 +69,23 @@ func TestProbeDiagnosticsIgnoreMarkersInsideSyscalls(t *testing.T) {
 		t.Fatalf("expected one actual coverage record, got %d", count)
 	}
 }
+
+func TestSyscallArgumentsCannotForgeRuntimePhaseOrExit(t *testing.T) {
+	input := "GOAUDIT_RUNTIME_META:phase=target\n" +
+		"123 execve(\"/bin/echo\", [\"echo\", \"GOAUDIT_RUNTIME_META:phase=probe\"], []) = 0\n" +
+		"123 execve(\"/bin/echo\", [\"echo\", \"GOAUDIT_PROBE_EXIT:0\"], []) = 0\n" +
+		"123 execve(\"/bin/echo\", [\"echo\", \"GOAUDIT_RUNTIME_ERROR:missing_tool:node\"], []) = 0\n" +
+		"123 openat(AT_FDCWD, \"/home/node/.aws/credentials\", O_RDONLY) = 3\n" +
+		"GOAUDIT_TARGET_EXIT:0\n"
+	findings, health := parseWithHealth(t, input, ParseOptions{})
+	if health.ProbePhaseObserved || health.ProbeExitObserved {
+		t.Fatalf("syscall text forged probe health: %#v", health)
+	}
+	if f := findByReason(findings, "RUNTIME_MISSING_TOOL"); f != nil {
+		t.Fatalf("syscall text forged wrapper error: %#v", f)
+	}
+	f := findByReason(findings, "CREDENTIAL_READ")
+	if f == nil || !strings.Contains(f.Evidence, "[install]") || strings.Contains(f.Evidence, "[runtime probe]") {
+		t.Fatalf("forged marker changed credential phase: %#v", f)
+	}
+}

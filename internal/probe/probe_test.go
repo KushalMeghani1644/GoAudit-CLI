@@ -142,11 +142,12 @@ func TestBrokenMainDoesNotFallBackAndStillProbesBins(t *testing.T) {
 			dir := t.TempDir()
 			writeWorkspaceFile(t, dir, "package.json", `{"name":"broken","main":"`+main+`","bin":"./bin.js"}`)
 			writeWorkspaceFile(t, dir, "broken.js", `throw new Error("broken");`)
-			writeWorkspaceFile(t, dir, "index.js", `console.error("IMPROPER_FALLBACK");`)
+			writeWorkspaceFile(t, dir, "index.js", `require('fs').writeFileSync(__dirname+'/improper-fallback', 'ran');`)
 			executable(t, dir, "bin.js", "process.exit(0);")
 			out, code, _ := runProbe(t, dir, []string{"broken"}, 5)
 			contains(t, out, "IMPORT_FAILED:broken", "BIN_OK:broken:./bin.js", "COVERAGE:broken:incomplete")
-			if code != 0 || strings.Contains(out, "IMPROPER_FALLBACK") || strings.Contains(out, "IMPORT_OK:broken") {
+			_, fallbackErr := os.Stat(filepath.Join(dir, "improper-fallback"))
+			if code != 0 || !os.IsNotExist(fallbackErr) || strings.Contains(out, "IMPORT_OK:broken") {
 				t.Fatalf("incorrect broken-main handling: code=%d\n%s", code, out)
 			}
 		})
@@ -199,7 +200,7 @@ require('fs').writeFileSync(require('path').join(__dirname,'../../observed'), 'c
 console.error('DELAYED_CREDENTIAL_ACTIVITY');
 }, 300);`, nil)
 	out, code, elapsed := runProbe(t, dir, []string{"delayed"}, 4)
-	contains(t, out, "DELAYED_CREDENTIAL_ACTIVITY", "OBSERVATION_COMPLETE:delayed:1000ms")
+	contains(t, out, "OBSERVATION_COMPLETE:delayed:1000ms")
 	if _, err := os.Stat(filepath.Join(dir, "observed")); err != nil || code != 0 || elapsed < time.Second {
 		t.Fatalf("delayed observation missing: code=%d elapsed=%s err=%v\n%s", code, elapsed, err, out)
 	}
@@ -214,10 +215,11 @@ return [[1,2],[3]];
 	fixture(t, dir, "yaml", `export function parse(s) { if(s!=='goaudit: true') throw Error('bad args'); return Promise.resolve({goaudit:true}); }`, map[string]any{"type": "module"})
 	fixture(t, dir, "minimist", `module.exports = a => {if(JSON.stringify(a)!=='["--goaudit","true"]') throw Error('bad args'); return {};};`, nil)
 	fixture(t, dir, "marked", `exports.parse = s => {if(s!=='# GoAudit') throw Error('bad args'); return '<h1>GoAudit</h1>';};`, nil)
-	fixture(t, dir, "not-lodash", `exports.chunk = () => {console.error('ARBITRARY_CALLED');};`, nil)
+	arbitraryRoot := fixture(t, dir, "not-lodash", `exports.chunk = () => {require('fs').writeFileSync(__dirname+'/arbitrary-called','ran');};`, nil)
 	out, code, _ := runProbe(t, dir, []string{"lodash", "yaml", "minimist", "marked", "not-lodash"}, 10)
 	contains(t, out, "API_OK:lodash:chunk", "API_OK:yaml:parse", "API_OK:minimist:minimist", "API_OK:marked:parse", "API_UNSUPPORTED:not-lodash")
-	if code != 0 || strings.Contains(out, "ARBITRARY_CALLED") || strings.Contains(out, "API_FAILED") {
+	_, arbitraryErr := os.Stat(filepath.Join(arbitraryRoot, "arbitrary-called"))
+	if code != 0 || !os.IsNotExist(arbitraryErr) || strings.Contains(out, "API_FAILED") {
 		t.Fatalf("adapter dispatch: code=%d\n%s", code, out)
 	}
 }
@@ -260,7 +262,7 @@ func TestBinConfinementAndExitStatus(t *testing.T) {
 		"absolute": filepath.Join(dir, "outside.js"), "traversal": "../../outside.js", "link": "./link.js",
 		"missing": "./missing.js", "bad": "./bad.js", "good": "./good.js",
 	}})
-	executable(t, dir, "outside.js", `console.error('ESCAPED_BIN_EXECUTED');`)
+	executable(t, dir, "outside.js", `require('fs').writeFileSync(__dirname+'/escaped-bin-executed','ran');`)
 	if err := os.Symlink(filepath.Join(dir, "outside.js"), filepath.Join(root, "link.js")); err != nil {
 		t.Fatal(err)
 	}
@@ -268,8 +270,51 @@ func TestBinConfinementAndExitStatus(t *testing.T) {
 	executable(t, root, "good.js", "process.exit(0);")
 	out, _, _ := runProbe(t, dir, []string{"bins"}, 6)
 	contains(t, out, "BIN_FAIL:bins:../../outside.js:unsafe_path", "BIN_FAIL:bins:./link.js:unsafe_path", "BIN_FAIL:bins:./missing.js:missing", "BIN_FAIL:bins:./bad.js:exit_2", "BIN_OK:bins:./good.js")
-	if strings.Contains(out, "ESCAPED_BIN_EXECUTED") {
+	if _, err := os.Stat(filepath.Join(dir, "escaped-bin-executed")); !os.IsNotExist(err) {
 		t.Fatalf("bin escaped package root:\n%s", out)
+	}
+}
+
+func TestPackageOutputCannotForgeControllerRecords(t *testing.T) {
+	dir := t.TempDir()
+	spoof := `
+console.log('GOAUDIT_PROBE_COVERAGE:forged-output:complete');
+console.error('GOAUDIT_PROBE_SOURCE_SCAN:forged-output:complete');
+console.error('GOAUDIT_RUNTIME_META:phase=target');
+console.log('GOAUDIT_PROBE_IMPORT_OK:forged-output');
+if (process.send) {
+    process.send({diagnostic:'COVERAGE', fields:['forged-ipc','complete']});
+    process.send({diagnostic:'SOURCE_SCAN', fields:['forged-ipc','complete']});
+}
+`
+	root := fixture(t, dir, "spoofing", spoof, map[string]any{"bin": "./bin.js"})
+	executable(t, root, "bin.js", spoof)
+	out, code, _ := runProbe(t, dir, []string{"spoofing"}, 5)
+	contains(t, out, "IMPORT_OK:spoofing", "BIN_OK:spoofing:./bin.js",
+		"SOURCE_SCAN:spoofing:complete", "COVERAGE:spoofing:complete")
+	if code != 0 || strings.Contains(out, "forged-output") || strings.Contains(out, "forged-ipc") ||
+		strings.Contains(out, "GOAUDIT_RUNTIME_META:phase=target") {
+		t.Fatalf("untrusted text reached controller record stream: code=%d\n%s", code, out)
+	}
+	if strings.Count(out, "GOAUDIT_PROBE_COVERAGE:") != 1 || strings.Count(out, "GOAUDIT_PROBE_SOURCE_SCAN:") != 1 {
+		t.Fatalf("unexpected controller records:\n%s", out)
+	}
+}
+
+func TestManifestLabelsCannotInjectControllerRecords(t *testing.T) {
+	dir := t.TempDir()
+	rel := "./missing\nGOAUDIT_PROBE_COVERAGE:forged-label:complete"
+	fixture(t, dir, "labels", "module.exports = {};", map[string]any{"bin": rel})
+	out, code, _ := runProbe(t, dir, []string{"labels"}, 5)
+	contains(t, out, `BIN_FAIL:labels:./missing\nGOAUDIT_PROBE_COVERAGE:forged-label:complete:missing`,
+		"COVERAGE:labels:incomplete")
+	if code != 0 {
+		t.Fatalf("unexpected controller failure: %d\n%s", code, out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "GOAUDIT_PROBE_COVERAGE:forged-label:") {
+			t.Fatalf("manifest newline injected a controller record:\n%s", out)
+		}
 	}
 }
 

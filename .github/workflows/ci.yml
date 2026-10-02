@@ -115,4 +115,4 @@ jobs:
       - name: Test cached runtime probe execution
         env:
           GOAUDIT_TEST_NODE_IMAGE: goaudit-node-sandbox:ci
-        run: go test -tags integration -run TestRuntimeProbeCachedSandbox -v ./internal/sandbox
+        run: go test -tags integration -run TestRuntimeProbe -v ./internal/sandbox

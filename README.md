@@ -247,6 +247,8 @@ Compatibility: `--probe-all` has been removed and is an unknown flag; replace it
 
 Human and JSON reports distinguish successful exercises, unsupported adapters, source inspection, and incomplete observation. Exercise failures or incomplete runtime coverage produce `INCONCLUSIVE`, unless observed malicious behavior takes precedence; install findings remain available. An unsupported adapter alone does not fail the scan.
 
+Package installation, import, and CLI stdout/stderr are not parsed as diagnostics. Only controller records, restricted harness IPC diagnostics, and syscall evidence reach the report stream. This prevents package output from forging coverage or source-inspection records; it does not make the shared worker JavaScript realm tamper-proof.
+
 Probing is bounded sampling, not a full application test: it cannot cover arbitrary exported APIs, interactive workflows, persistent CLI activity after exit, or all delayed activity. A clean probe does not establish that a package is safe, and default-off scans provide no post-install probe coverage. Install-time tracing still runs without this opt-in.
 
 See [the KUS-54 decision and benchmark](docs/runtime-probe-decision.md) and [probe implementation notes](internal/probe/README.md).

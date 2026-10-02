@@ -4,6 +4,7 @@ package sandbox_test
 
 import (
 	"context"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -45,10 +46,16 @@ func TestRuntimeProbeCachedSandbox(t *testing.T) {
 			if err := s.PrepareWarm(ctx, "npm", image, []string{"node", "npm", "strace"}, nil); err != nil {
 				t.Fatal(err)
 			}
-			target := `cat > /workspace/package.json <<'MANIFEST'
+			target := `echo 'GOAUDIT_PROBE_COVERAGE:forged-target:complete'
+echo 'GOAUDIT_PROBE_SOURCE_SCAN:forged-target:complete' >&2
+echo 'GOAUDIT_RUNTIME_META:phase=probe' >&2
+cat > /workspace/package.json <<'MANIFEST'
 {"name":"goaudit-cached-fixture","version":"1.0.0","main":"index.cjs"}
 MANIFEST
 cat > /workspace/index.cjs <<'SOURCE'
+console.log("GOAUDIT_PROBE_COVERAGE:forged-package:complete");
+console.error("GOAUDIT_PROBE_SOURCE_SCAN:forged-package:complete");
+console.error("GOAUDIT_RUNTIME_META:phase=target");
 setTimeout(() => require("fs").readFileSync(require("path").join(require("os").homedir(), ".aws", "credentials")), 200);
 SOURCE
 `
@@ -66,6 +73,11 @@ SOURCE
 			}
 			if !health.Usable() || health.TargetExitCode != 0 {
 				t.Fatalf("incomplete trace: %#v", health)
+			}
+			for _, f := range findings {
+				if strings.Contains(f.Path, "forged-") || strings.Contains(f.Evidence, "forged-") {
+					t.Fatalf("package output forged a parser record: %#v", f)
+				}
 			}
 			want := report.VerdictClean
 			if enabled {
@@ -86,5 +98,48 @@ SOURCE
 				t.Fatalf("expected %s, got %s: %#v", want, got, findings)
 			}
 		})
+	}
+}
+
+func TestRuntimeProbeSandboxTimeoutRecords(t *testing.T) {
+	image := os.Getenv("GOAUDIT_TEST_NODE_IMAGE")
+	if image == "" {
+		t.Skip("set GOAUDIT_TEST_NODE_IMAGE to a prepared Node sandbox image")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	s, err := sandbox.NewSandbox(ctx, image, sandbox.SandboxOptions{NetworkEnabled: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Cleanup(context.Background(), false)
+	if _, err := s.EnsureImage(ctx); err != nil {
+		t.Fatal(err)
+	}
+	target := `cat > /workspace/package.json <<'MANIFEST'
+{"name":"hanging","version":"1.0.0","main":"index.cjs"}
+MANIFEST
+echo 'for (;;) {}' > /workspace/index.cjs
+`
+	stream, err := s.RunCommand(ctx, target, probe.GenerateNodeProbeScript([]string{"hanging"}, 4), "npm", image, []string{"node", "strace"}, nil, "30s", "4s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings, health, err := parser.ParseStreamWithHealth(strings.NewReader(string(raw)), report.NewReporter(true, false), parser.ParseOptions{ProbeExpected: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.ReasonCode == "PROBE_PACKAGE_TIMEOUT" {
+			found = true
+		}
+	}
+	if !found || !health.ProbeExitObserved || health.ProbeExitCode != 124 {
+		t.Fatalf("missing timeout records: health=%#v\nraw stream:\n%s", health, raw)
 	}
 }

@@ -42,8 +42,20 @@ non-file, and symlink-escape entries fail without execution.
 
 ## Markers
 
-Markers are emitted on stderr. Package and bin labels retain their existing
-colon-separated representation (including scoped package names).
+Only the controller emits markers on stderr. Import/API workers and CLI bins
+have stdout and stderr disconnected from the parser stream; the worker harness
+uses a separate IPC channel. The controller accepts only the worker's
+import/API/observation diagnostic kinds and supplies the selected package label
+itself. Coverage, source scanning, bin results, and deadlines are controller-owned
+and cannot be supplied as worker messages. Newlines in manifest/error labels are
+escaped so labels cannot introduce extra records. Each marker starts on a new
+line even if a wrapper has written a partial timeout message. Installation command output
+is also excluded from the parser stream; syscall traces and wrapper status
+records remain available.
+
+Package and bin labels retain their existing colon-separated representation
+(including scoped package names). This separation blocks stdout/stderr record
+spoofing, not arbitrary tampering inside the shared worker JavaScript realm.
 
 | Marker | Meaning |
 | --- | --- |
@@ -82,7 +94,8 @@ is reported unsupported, even if runtime ESM loading works.
 
 Process groups clean descendants that inherit the worker's group. Deliberately
 detached children, session escapes, killing the controller, monkeypatching
-worker reporting, marker spoofing, filesystem races, and other hostile actions
+worker reporting/IPC, direct access to other processes' file descriptors,
+filesystem races, and other hostile actions
 require the sandbox/cgroup boundary. Path validation is not a race-proof
 replacement for sandbox containment. Node initialization and controller startup
 add overhead outside the internal deadline, bounded by the shell watchdog.

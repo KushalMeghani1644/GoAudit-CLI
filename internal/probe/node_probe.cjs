@@ -7,7 +7,12 @@ const path = require('path');
 const url = require('url');
 const cp = require('child_process');
 const workspace = '/workspace';
-const mark = (kind, ...fields) => console.error('GOAUDIT_PROBE_' + kind + (fields.length ? ':' + fields.join(':') : ''));
+// Only the controller writes records to the parser stream. Manifest labels and
+// error details must not introduce another record through embedded newlines.
+// A leading newline also separates records from partial wrapper messages (for
+// example runuser's "Session terminated, killing shell..." on timeout).
+const mark = (kind, ...fields) => console.error('\nGOAUDIT_PROBE_' + kind +
+    (fields.length ? ':' + fields.map(field => String(field).replace(/\r/g, '\\r').replace(/\n/g, '\\n')).join(':') : ''));
 const errorCode = e => (e && e.code) || 'ERR';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -81,10 +86,16 @@ const adapters = {
 async function worker(pkg, root, deadline) {
     let api;
     let incomplete = false;
+    // Package stdout/stderr is discarded. Send harness diagnostics separately;
+    // capture the sender before package code can replace process.send.
+    const send = process.send ? process.send.bind(process) : null;
+    const mark = (kind, _pkg, ...fields) => {
+        if (send) send({ diagnostic: kind, fields: fields.map(String) });
+    };
     // Pending promises alone don't keep Node alive. Keep this worker alive
     // until its external deadline, including unresolved ESM top-level await.
     const keepAlive = setInterval(() => {}, 1000);
-    const progress = data => { if (process.send) process.send(data); };
+    const progress = data => { if (send) send(data); };
     progress({ stage: 'import' });
     try { api = await load(pkg, root); mark('IMPORT_OK', pkg); }
     catch (e) { incomplete = true; mark('IMPORT_FAILED', pkg, errorCode(e)); }
@@ -115,7 +126,7 @@ async function worker(pkg, root, deadline) {
     await delay(Math.min(1000, available));
     if (available >= 1000) mark('OBSERVATION_COMPLETE', pkg, '1000ms');
     clearInterval(keepAlive);
-    if (process.send) process.send({ complete: true, incomplete }, () => process.exit(0));
+    if (send) send({ complete: true, incomplete }, () => process.exit(0));
     else process.exit(0);
 }
 
@@ -175,21 +186,41 @@ function killGroup(pid) {
 }
 function cleanup() { for (const pid of groups) killGroup(pid); }
 
-function run(command, args, deadline, ipc = false) {
+// Workers may describe only their own import/API/observation attempts. Coverage,
+// source inspection, bins, deadlines, and phase records are controller-owned.
+const workerDiagnostics = new Set([
+    'IMPORT_OK', 'IMPORT_FAILED', 'API_OK', 'API_FAILED', 'API_UNSUPPORTED',
+    'OBSERVATION_COMPLETE', 'OBSERVATION_INCOMPLETE'
+]);
+
+function run(command, args, deadline, pkg = null) {
     return new Promise(resolve => {
         if (Date.now() >= deadline) return resolve({ timeout: true });
         let child;
         try {
             child = cp.spawn(command, args, {
                 cwd: workspace, env: process.env, detached: true,
-                // Inherited output avoids pipe EOF waits on grandchildren.
-                stdio: ipc ? ['ignore', 'inherit', 'inherit', 'ipc'] : ['ignore', 'inherit', 'inherit']
+                // Never let package/bin text impersonate parser records. IPC is
+                // distinct from both output streams and is absent from bin runs.
+                stdio: pkg !== null ? ['ignore', 'ignore', 'ignore', 'ipc'] : ['ignore', 'ignore', 'ignore']
             });
         } catch (e) { return resolve({ error: errorCode(e) }); }
         if (child.pid) groups.add(child.pid);
         let settled = false;
         let status = {};
-        if (ipc) child.on('message', message => { status = { ...status, ...message }; });
+        if (pkg !== null) child.on('message', message => {
+            if (settled || !message || typeof message !== 'object') return;
+            if (workerDiagnostics.has(message.diagnostic) && Array.isArray(message.fields) &&
+                message.fields.length <= 2 && message.fields.every(field => typeof field === 'string' && field.length <= 256)) {
+                // The package label comes from the controller, not the worker.
+                mark(message.diagnostic, pkg, ...message.fields);
+            }
+            if (['import', 'api', 'observation'].includes(message.stage)) status.stage = message.stage;
+            if (message.complete === true) {
+                status.complete = true;
+                status.incomplete = message.incomplete !== false;
+            }
+        });
         const finish = result => {
             if (settled) return;
             settled = true;
@@ -221,7 +252,7 @@ async function controller() {
         const entries = binEntries(root);
         // Reserve half for bins, even if import hangs or exits.
         const importDeadline = Date.now() + Math.max(0, Math.floor((packageDeadline - Date.now()) / (entries.length ? 2 : 1)));
-        const result = await run(process.execPath, [__filename, '--worker', pkg, root || '', String(importDeadline)], importDeadline, true);
+        const result = await run(process.execPath, [__filename, '--worker', pkg, root || '', String(importDeadline)], importDeadline, pkg);
         const status = result.status || {};
         let incomplete = Boolean(status.incomplete);
         if (result.timeout) {
