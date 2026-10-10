@@ -129,42 +129,46 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 	for scanner.Scan() {
 		line := scanner.Text()
 
-		if strings.Contains(line, "GOAUDIT_RUNTIME_ERROR:missing_tool:") {
+		if strings.HasPrefix(strings.TrimSpace(line), "GOAUDIT_RUNTIME_ERROR:missing_tool:") {
 			tool := strings.TrimSpace(strings.TrimPrefix(line[strings.Index(line, "GOAUDIT_RUNTIME_ERROR:missing_tool:"):], "GOAUDIT_RUNTIME_ERROR:missing_tool:"))
 			emit(report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: "RUNTIME_MISSING_TOOL", Path: tool, Confidence: 90})
 			continue
 		}
-		if strings.Contains(line, "GOAUDIT_RUNTIME_ERROR:prep_failed") {
+		if strings.HasPrefix(strings.TrimSpace(line), "GOAUDIT_RUNTIME_ERROR:prep_failed") {
 			emit(report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: "RUNTIME_PREP_FAILURE", Path: "sandbox prep failed", Confidence: 90})
 			continue
 		}
-		if strings.Contains(line, "GOAUDIT_RUNTIME_ERROR:project_copy_failed") {
+		if strings.HasPrefix(strings.TrimSpace(line), "GOAUDIT_RUNTIME_ERROR:project_copy_failed") {
 			emit(report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: "RUNTIME_PROJECT_COPY_FAILURE", Path: "project mount", Confidence: 90})
 			continue
 		}
-		if strings.Contains(line, "GOAUDIT_PROBE_IMPORT_OK:") {
+		if f, ok := parseProbeDiagnostic(line); ok {
+			emit(f)
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(line), "GOAUDIT_PROBE_IMPORT_OK:") {
 			pkg := strings.TrimSpace(line[strings.Index(line, "GOAUDIT_PROBE_IMPORT_OK:")+len("GOAUDIT_PROBE_IMPORT_OK:"):])
 			emit(report.Finding{Severity: report.SeverityInfo, Type: "runtime", ReasonCode: "PROBE_IMPORT_OK", Path: pkg, Confidence: 90})
 			continue
 		}
-		if strings.Contains(line, "GOAUDIT_PROBE_IMPORT_FAILED:") {
+		if strings.HasPrefix(strings.TrimSpace(line), "GOAUDIT_PROBE_IMPORT_FAILED:") {
 			pkg := strings.TrimSpace(line[strings.Index(line, "GOAUDIT_PROBE_IMPORT_FAILED:")+len("GOAUDIT_PROBE_IMPORT_FAILED:"):])
 			emit(report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: "PROBE_IMPORT_FAILED", Path: pkg, Confidence: 70})
 			continue
 		}
-		if strings.Contains(line, "GOAUDIT_PROBE_TIMEOUT") {
+		if strings.HasPrefix(strings.TrimSpace(line), "GOAUDIT_PROBE_TIMEOUT") {
 			emit(report.Finding{Severity: report.SeverityWarning, Type: "runtime", ReasonCode: "PROBE_COMMAND_TIMEOUT", Path: "124", Confidence: 95, Evidence: "Runtime probe timed out"})
 			continue
 		}
-		if strings.Contains(line, "GOAUDIT_PROBE_LIMITATION") {
+		if strings.HasPrefix(strings.TrimSpace(line), "GOAUDIT_PROBE_LIMITATION") {
 			key := "PROBE_LIMITATION"
 			if !seen[key] {
 				seen[key] = true
-				emit(report.Finding{Severity: report.SeverityInfo, Type: "runtime", ReasonCode: "PROBE_LIMITATION", Path: "probe", Confidence: 90, Evidence: "Runtime probe covers package import/require and optional bin --help only"})
+				emit(report.Finding{Severity: report.SeverityInfo, Type: "runtime", ReasonCode: "PROBE_LIMITATION", Path: "probe", Confidence: 90, Evidence: "Bounded runtime sampling covers entrypoint loading, declared bin --help, selected API adapters, and a short observation window; arbitrary APIs, long delays, and application-specific paths are not covered"})
 			}
 			continue
 		}
-		if strings.Contains(line, "GOAUDIT_RUNTIME_META:") {
+		if strings.HasPrefix(strings.TrimSpace(line), "GOAUDIT_RUNTIME_META:") {
 			meta := strings.TrimSpace(line[strings.Index(line, "GOAUDIT_RUNTIME_META:")+len("GOAUDIT_RUNTIME_META:"):])
 			if strings.Contains(meta, "phase=probe") {
 				probePhase = true
@@ -180,8 +184,8 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 			emit(report.Finding{Severity: report.SeverityInfo, Type: "runtime", ReasonCode: "RUNTIME_METADATA", Path: "sandbox", Confidence: 90, Evidence: meta})
 			continue
 		}
-		if strings.Contains(line, "GOAUDIT_TARGET_EXIT:") || strings.Contains(line, "GOAUDIT_PROBE_EXIT:") {
-			isProbeExit := strings.Contains(line, "GOAUDIT_PROBE_EXIT:")
+		if strings.HasPrefix(strings.TrimSpace(line), "GOAUDIT_TARGET_EXIT:") || strings.HasPrefix(strings.TrimSpace(line), "GOAUDIT_PROBE_EXIT:") {
+			isProbeExit := strings.HasPrefix(strings.TrimSpace(line), "GOAUDIT_PROBE_EXIT:")
 			marker := "GOAUDIT_TARGET_EXIT:"
 			if isProbeExit {
 				marker = "GOAUDIT_PROBE_EXIT:"

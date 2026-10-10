@@ -218,6 +218,11 @@ func tracedPhaseScript(phase, command, timeoutValue string) string {
 		varName = "GOAUDIT_PROBE_RC"
 		marker = "GOAUDIT_PROBE_EXIT"
 	}
+	if phase == "target" {
+		// Installation output is untrusted text, not runtime metadata. Syscalls
+		// remain in the separate trace file; wrapper status records remain visible.
+		command += " >/dev/null 2>/dev/null"
+	}
 	traceFile := fmt.Sprintf("/tmp/goaudit-%s.strace", phase)
 	return fmt.Sprintf(`echo "GOAUDIT_RUNTIME_META:phase=%s" >&2
 rm -f %s

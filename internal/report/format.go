@@ -543,10 +543,13 @@ func writeNetworkSummary(b *strings.Builder, findings []Finding) {
 
 func writeProbeSummary(b *strings.Builder, findings []Finding, hasInstallRisk, hasProbeRisk bool) {
 	hasProbeMeta := false
+	incomplete := false
 	for _, f := range findings {
 		if f.ReasonCode == "RUNTIME_METADATA" && strings.Contains(f.Evidence, "phase=probe") {
 			hasProbeMeta = true
-			break
+		}
+		if isProbeCoverageFailure(f) {
+			incomplete = true
 		}
 	}
 	if !hasProbeMeta {
@@ -555,14 +558,25 @@ func writeProbeSummary(b *strings.Builder, findings []Finding, hasInstallRisk, h
 	b.WriteString("Runtime Probe\n")
 	switch {
 	case hasProbeRisk:
-		b.WriteString("   - Runtime import probe observed suspicious behavior\n")
+		b.WriteString("   - Runtime probe observed suspicious behavior\n")
+	case incomplete:
+		b.WriteString("   - Runtime coverage was incomplete; install findings remain available\n")
 	case hasInstallRisk:
-		b.WriteString("   - Runtime import probe completed without re-triggering malicious behavior\n")
+		b.WriteString("   - No additional suspicious behavior observed in runtime exercises\n")
 		b.WriteString("   - Malicious activity was already observed during install-time sandbox tracing\n")
 	default:
-		b.WriteString("   - Runtime import probe completed without suspicious behavior\n")
-		b.WriteString("   - No credential access, suspicious writes, or unknown exfiltration detected during import\n")
+		b.WriteString("   - No suspicious behavior observed in bounded runtime exercises\n")
 	}
+	for _, f := range findings {
+		switch f.ReasonCode {
+		case "PROBE_IMPORT_OK", "PROBE_IMPORT_FAILED", "PROBE_API_OK", "PROBE_API_FAILED",
+			"PROBE_API_UNSUPPORTED", "PROBE_BIN_OK", "PROBE_BIN_FAIL", "PROBE_COVERAGE",
+			"PROBE_OBSERVATION_COMPLETE", "PROBE_OBSERVATION_INCOMPLETE", "PROBE_PACKAGE_TIMEOUT",
+			"PROBE_SOURCE_SCAN", "PROBE_OBFUSCATION":
+			fmt.Fprintf(b, "   - %s: %s\n", f.ReasonCode, f.Path)
+		}
+	}
+	b.WriteString("   - Sampling is not a safety guarantee: arbitrary APIs, long delays, and application-specific paths remain untested\n")
 }
 
 func isProbeFinding(f Finding) bool {
@@ -657,6 +671,9 @@ func splitOperational(findings []Finding, severity Severity) []Finding {
 }
 
 func isOperationalFinding(f Finding) bool {
+	if isProbeCoverageFailure(f) {
+		return true
+	}
 	switch f.ReasonCode {
 	case "RUNTIME_MISSING_TOOL", "RUNTIME_PREP_FAILURE", "RUNTIME_TRACE_UNAVAILABLE",
 		"RUNTIME_PROJECT_COPY_FAILURE", "RUNSC_FALLBACK_RUNC", "RUNSC_TRACE_FALLBACK_RUNC",

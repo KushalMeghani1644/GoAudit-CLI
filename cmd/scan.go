@@ -20,6 +20,7 @@ var (
 	nodeImage     string
 	bunImage      string
 	networkMode   string
+	runtimeProbe  bool
 	skipProbe     bool
 	noCache       bool
 	warmCache     bool
@@ -46,15 +47,13 @@ var scanCmd = &cobra.Command{
 		}
 		return validateInstallCommand(strings.Join(args, " "))
 	},
+	PreRunE: validateRuntimeProbeFlags,
 	Run: func(cmd *cobra.Command, args []string) {
 		targetCmd := strings.Join(args, " ")
 		profile := inferProfile(targetCmd)
 		reporter := report.NewReporter(ciMode, verbose)
 
-		var probePackages []string
-		if !skipProbe {
-			probePackages = analyzer.ExtractPackageNamesFromCommand(targetCmd)
-		}
+		probePackages := requestedProbePackages(targetCmd, runtimeProbe)
 
 		runtimeTargetCmd, projectPath, localFindings := prepareLocalPackageInstall(targetCmd)
 
@@ -80,7 +79,6 @@ var scanCmd = &cobra.Command{
 				projectPath:    projectPath,
 				runtimeCommand: runtimeTargetCmd,
 				probePackages:  probePackages,
-				skipProbe:      skipProbe,
 			})
 			cleanup()
 			if err != nil {
@@ -94,7 +92,6 @@ var scanCmd = &cobra.Command{
 			runtimeCommand: runtimeTargetCmd,
 			priorFindings:  localFindings,
 			probePackages:  probePackages,
-			skipProbe:      skipProbe,
 			targetTimeout:  targetTimeout,
 			probeTimeout:   probeTimeout,
 		})
@@ -106,6 +103,34 @@ var scanCmd = &cobra.Command{
 			os.Exit(1)
 		}
 	},
+}
+
+func requestedProbePackages(command string, enabled bool) []string {
+	if !enabled {
+		return nil
+	}
+	return analyzer.ExtractPackageNamesFromCommand(command)
+}
+
+func validateRuntimeProbeFlags(cmd *cobra.Command, _ []string) error {
+	enabled, err := cmd.Flags().GetBool("runtime-probe")
+	if err != nil {
+		return err
+	}
+	skip, err := cmd.Flags().GetBool("skip-probe")
+	if err != nil {
+		return err
+	}
+	if enabled && skip {
+		return fmt.Errorf("--runtime-probe and --skip-probe cannot both be true")
+	}
+	return nil
+}
+
+func addRuntimeProbeFlags(cmd *cobra.Command, scope string) {
+	cmd.Flags().BoolVar(&runtimeProbe, "runtime-probe", false, "Enable post-install runtime probing of "+scope+" (off by default)")
+	cmd.Flags().BoolVar(&skipProbe, "skip-probe", false, "Deprecated compatibility no-op; runtime probing is off by default")
+	_ = cmd.Flags().MarkDeprecated("skip-probe", "runtime probing is off by default; remove this flag (use --runtime-probe to opt in)")
 }
 
 func validateInstallCommand(command string) error {
@@ -202,12 +227,12 @@ func init() {
 	scanCmd.Flags().StringVar(&nodeImage, "node-image", sandbox.DefaultNodeImage, "Node.js image used for npm/pnpm scans")
 	scanCmd.Flags().StringVar(&bunImage, "bun-image", sandbox.DefaultBunImage, "Bun image used for bun scans")
 	scanCmd.Flags().StringVar(&networkMode, "network", "auto", "Network policy: auto (based on command type), on, or off")
-	scanCmd.Flags().BoolVar(&skipProbe, "skip-probe", false, "Skip runtime behavior probe after install")
+	addRuntimeProbeFlags(scanCmd, "packages named in the install command")
 	scanCmd.Flags().BoolVar(&noCache, "no-cache", false, "Disable sandbox caching for this run (no warm container is stored)")
 	scanCmd.Flags().BoolVar(&warmCache, "warm-cache", false, "Prepare and cache the sandbox without running a scan")
 	scanCmd.Flags().StringVar(&cacheDir, "cache-dir", "", "Custom directory for sandbox cache (or set GOAUDIT_CACHE_DIR)")
 	scanCmd.Flags().StringVar(&targetTimeout, "timeout", "", "Maximum time for the install/target command (default: profile-based)")
-	scanCmd.Flags().StringVar(&probeTimeout, "probe-timeout", "30s", "Maximum time for runtime import probe")
+	scanCmd.Flags().StringVar(&probeTimeout, "probe-timeout", "30s", "Maximum time for runtime probe")
 	scanCmd.Flags().StringVar(&failOn, "fail-on", "never", "Exit non-zero on: never, malicious, inconclusive, or malicious,inconclusive")
 	scanCmd.Flags().BoolVar(&mountCwd, "mount-cwd", false, "Allow mounting the current working directory for multi-local package installs (secret-redacted stage)")
 	rootCmd.AddCommand(scanCmd)

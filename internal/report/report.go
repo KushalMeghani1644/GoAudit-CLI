@@ -398,6 +398,9 @@ func Evaluate(findings []Finding, opts EvaluationOptions) Verdict {
 			f.ReasonCode == "PROBE_COMMAND_TIMEOUT" {
 			inconclusive = true
 		}
+		if isProbeCoverageFailure(f) {
+			inconclusive = true
+		}
 		if f.ReasonCode == "RUNTIME_TRACE_UNAVAILABLE" {
 			if !hasRunscFallback || hasRuncTraceUnavailable || strings.Contains(strings.ToLower(f.Evidence), "runc runtime trace") {
 				inconclusive = true
@@ -420,6 +423,20 @@ func Evaluate(findings []Finding, opts EvaluationOptions) Verdict {
 		return VerdictSuspicious
 	}
 	return VerdictClean
+}
+
+// Execution incompatibilities and budget limits are missing coverage, not
+// evidence of malware. Malicious observations still take verdict precedence.
+func isProbeCoverageFailure(f Finding) bool {
+	switch f.ReasonCode {
+	case "PROBE_IMPORT_FAILED", "PROBE_BIN_FAIL", "PROBE_API_FAILED",
+		"PROBE_OBSERVATION_INCOMPLETE", "PROBE_PACKAGE_TIMEOUT",
+		"PROBE_COMMAND_FAILED", "PROBE_COMMAND_NOT_FOUND", "PROBE_COMMAND_TIMEOUT":
+		return true
+	case "PROBE_COVERAGE":
+		return strings.HasSuffix(f.Path, ":incomplete")
+	}
+	return false
 }
 
 func (r *Reporter) Report(findings []Finding, meta ReportMeta) Verdict {

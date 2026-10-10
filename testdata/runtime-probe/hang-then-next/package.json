@@ -1,0 +1,10 @@
+{
+  "name": "goaudit-test-runtime-hang-then-next",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.cjs",
+  "dependencies": {
+    "aaa-goaudit-test-hanging": "file:./packages/hanging",
+    "zzz-goaudit-test-following": "file:./packages/following"
+  }
+}
