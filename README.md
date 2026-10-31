@@ -148,7 +148,6 @@ Common flags (both `scan` and `scan-project` unless noted):
 | `--no-cache` | Do not store a warm container after this run |
 | `--timeout` | Max time for the install command |
 | `--probe-timeout` | Max time for the runtime probe (default: 30s) |
-| `--mount-cwd` | `scan` only: allow mounting CWD for multi-local package installs |
 
 ```zsh
 goaudit scan "npm install <package>" --ci --fail-on malicious,inconclusive
@@ -170,7 +169,6 @@ goaudit scan-project ~/app --manager pnpm
 goaudit scan-project ~/app --include-transitive
 goaudit scan-project ~/app --runtime-probe
 goaudit scan-project ~/app --include-transitive --runtime-probe
-goaudit scan-project ~/app --mount-project
 ```
 
 Upgrade modes:
@@ -188,7 +186,6 @@ Project-only flags:
 | `--upgrade-mode` | `refresh-lock`, `ncu`, or `update` |
 | `--manager` | Force `npm`, `pnpm`, or `bun` |
 | `--include-transitive` | Also registry-check packages listed in the manager's lockfile (`package-lock.json`, `pnpm-lock.yaml`, or `bun.lock`); does not expand runtime probe scope |
-| `--mount-project` | Stage the full project tree (secret paths redacted) instead of manifests/lockfiles only |
 
 ### Package manager support
 
@@ -255,9 +252,36 @@ See [the KUS-54 decision and benchmark](docs/runtime-probe-decision.md) and [pro
 
 ### Project staging
 
-`scan-project` stages install inputs (manifests/lockfiles) into the sandbox by default so install scripts cannot read host secrets via `/project-ro`. Pass `--mount-project` for a full-tree stage with known secret paths redacted.
+**We never mount your project files. Only manifests.**
 
-For `scan`, multi-local package installs refuse mounting the working directory unless `--mount-cwd` is set.
+Both `scan-project` and local-directory `scan` installs copy only the root
+`package.json` and supported lockfiles (`package-lock.json`, `npm-shrinkwrap.json`,
+`pnpm-lock.yaml`, `bun.lock`, and `bun.lockb`) into a temporary directory. Only that
+directory is mounted read-only at `/project-ro` and copied into the sandbox's
+writable workspace. The live host project is never mounted. Symlinks and
+non-regular files are not copied; `package.json` must be a regular file.
+
+Source files, workspace directories, `pnpm-workspace.yaml`, `patches/`, `.yarn/`,
+and registry configuration such as `.npmrc` are never staged. In particular,
+`.npmrc` can contain credentials, so it is excluded even when present. There is
+no secret-filename detection or redaction: files outside the allowlist simply
+never enter the stage. The allowed manifests/lockfiles are copied verbatim;
+do not embed credentials in them.
+
+Compatibility: `--mount-project` and `--mount-cwd` have been removed and are
+unknown flags. Remove them from existing invocations. Multi-local or unsupported
+local installs never mount the working directory; they emit
+`LOCAL_PACKAGE_REWRITE_UNAVAILABLE` and may fail unless their inputs already
+exist in the sandbox image.
+
+This scans dependency installation, not a complete application build. Lifecycle
+scripts that require source files, local `file:` dependencies, workspace installs,
+and patch-based installs may fail or provide incomplete coverage. Workspace
+dependencies can still receive host-side static checks, but workspace source and
+manifests are not staged for installation. Runtime probes of local packages may
+fail when their entrypoints are absent. Private-registry installs requiring host
+`.npmrc` credentials are not supported. Do not interpret a failed install or
+incomplete probe as evidence that a package is safe.
 
 ## Cache
 
@@ -312,6 +336,6 @@ GoAudit provides a risk assessment based on behavior and static indicators. It i
 Other documented limits:
 
 - Package commands are not fully shell-parsed (pipes, substitutions, and complex wrappers may be incomplete).
-- Secret redaction under `--mount-project` covers common paths, not every possible secret filename.
+- Manifests-only staging cannot reproduce source-dependent builds or workspace/local dependency installs (see [Project staging](#project-staging)).
 - Private registry auth is not used for host-side static analysis.
 - Semver ranges may resolve to registry "latest" with an approximate-version finding.

@@ -1,0 +1,11 @@
+# Test-only image: production images must not contain behavioral fixtures.
+# Package fixture files without executing npm hooks or importing their code.
+ARG BASE_IMAGE=goaudit-node-sandbox:ci
+FROM ${BASE_IMAGE}
+COPY testdata/runtime-probe/ /opt/goaudit-e2e/runtime-probe/
+COPY testdata/privilege-escalation/ /opt/goaudit-e2e/privilege-escalation/
+RUN find /opt/goaudit-e2e -name package.json -exec sh -c \
+    'for manifest do \
+       dir=$(dirname "$manifest"); \
+       tar -czf "$dir.tgz" -C "$(dirname "$dir")" "$(basename "$dir")"; \
+     done' sh {} +

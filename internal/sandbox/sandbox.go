@@ -203,6 +203,10 @@ const StraceTraceSet = "open,openat,openat2,connect,execve,chmod,fchmod,fchmodat
 const targetTimeout = "180s"
 const defaultProbeTimeout = "30s"
 
+// Pass the watchdog's timestamp as an argument through the login shell rather
+// than relying on runuser or shell initialization to preserve its environment.
+const probePhaseCommand = `runuser -u "$SANDBOX_USER" -- bash -lc 'cd /workspace && GOAUDIT_PROBE_STARTED_MS="$1" bash /tmp/probe.sh' goaudit-probe "$GOAUDIT_PROBE_STARTED_MS"`
+
 func normalizeTimeout(value, fallback string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -214,9 +218,11 @@ func normalizeTimeout(value, fallback string) string {
 func tracedPhaseScript(phase, command, timeoutValue string) string {
 	varName := "GOAUDIT_TARGET_RC"
 	marker := "GOAUDIT_TARGET_EXIT"
+	startTime := ""
 	if phase == "probe" {
 		varName = "GOAUDIT_PROBE_RC"
 		marker = "GOAUDIT_PROBE_EXIT"
+		startTime = "GOAUDIT_PROBE_STARTED_MS=$(date +%s%3N)\n"
 	}
 	if phase == "target" {
 		// Installation output is untrusted text, not runtime metadata. Syscalls
@@ -227,7 +233,7 @@ func tracedPhaseScript(phase, command, timeoutValue string) string {
 	return fmt.Sprintf(`echo "GOAUDIT_RUNTIME_META:phase=%s" >&2
 rm -f %s
 set +e
-timeout %s strace -s 256 -f -e trace=%s -o %s %s
+%stimeout %s strace -s 256 -f -e trace=%s -o %s %s
 %s=$?
 set -e
 echo "%s:${%s}" >&2
@@ -237,7 +243,7 @@ fi
 if [ -s %s ]; then
   cat %s >&2
 fi
-`, phase, traceFile, timeoutValue, StraceTraceSet, traceFile, command, varName, marker, varName, varName, phase, traceFile, traceFile)
+`, phase, traceFile, startTime, timeoutValue, StraceTraceSet, traceFile, command, varName, marker, varName, varName, phase, traceFile, traceFile)
 }
 
 func scriptHeredoc(path, content, prefix string) string {
@@ -296,7 +302,7 @@ SANDBOX_HOME=$(eval echo "~${SANDBOX_USER}")
 	probeLine := ""
 	if strings.TrimSpace(probeScript) != "" {
 		catProbe := scriptHeredoc("/tmp/probe.sh", probeScript, "GOAUDIT_PROBE")
-		probeLine = catProbe + tracedPhaseScript("probe", `runuser -u "$SANDBOX_USER" -- bash -lc 'cd /workspace && bash /tmp/probe.sh'`, probeTimeoutValue)
+		probeLine = catProbe + tracedPhaseScript("probe", probePhaseCommand, probeTimeoutValue)
 	}
 
 	script := fmt.Sprintf(`set -euo pipefail
@@ -586,7 +592,7 @@ SANDBOX_HOME=$(eval echo "~${SANDBOX_USER}")` + "\n"
 	probeLine := ""
 	if strings.TrimSpace(probeScript) != "" {
 		catProbe := scriptHeredoc("/tmp/probe.sh", probeScript, "GOAUDIT_PROBE")
-		probeLine = catProbe + tracedPhaseScript("probe", `runuser -u "$SANDBOX_USER" -- bash -lc 'cd /workspace && bash /tmp/probe.sh'`, probeTimeoutValue)
+		probeLine = catProbe + tracedPhaseScript("probe", probePhaseCommand, probeTimeoutValue)
 	}
 
 	scanScript := fmt.Sprintf(`set -euo pipefail

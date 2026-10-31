@@ -17,7 +17,7 @@ func TestGenerateNodeProbeScript(t *testing.T) {
 		t.Fatalf("nil packages: %q", got)
 	}
 	script := GenerateNodeProbeScript([]string{"@scope/pkg", "lodash"}, 0)
-	for _, want := range []string{`"@scope/pkg"`, `"lodash"`, "timeoutMS = 15000", ".goaudit_probe.cjs", "NODE_PATH=/workspace/node_modules", "--kill-after=1s 17"} {
+	for _, want := range []string{`"@scope/pkg"`, `"lodash"`, "timeoutMS = 15000", ".goaudit_probe.cjs", "NODE_PATH=/workspace/node_modules", "--kill-after=1s 17", "GOAUDIT_PROBE_STARTED_MS=${GOAUDIT_PROBE_STARTED_MS:-$(date +%s%3N)}", `"$GOAUDIT_PROBE_STARTED_MS"`} {
 		if !strings.Contains(script, want) {
 			t.Errorf("missing %q", want)
 		}
@@ -98,22 +98,36 @@ func TestTimeoutCoveragePrecedesSandboxDeadline(t *testing.T) {
 			t.Skip(tool + " not installed")
 		}
 	}
-	dir := t.TempDir()
-	fixture(t, dir, "hanging", "for (;;) {}", nil)
-	script := strings.ReplaceAll(GenerateNodeProbeScript([]string{"hanging"}, 3), "/workspace", dir)
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-	defer cancel()
-	// Model the real sandbox's deadline beginning before shell/strace/Node
-	// startup. Coverage must be emitted before its outer timeout kills Node.
-	cmd := exec.CommandContext(ctx, "timeout", "3s", "sh", "-c", "sleep 0.2\n"+script)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	exit, ok := err.(*exec.ExitError)
-	if !ok || exit.ExitCode() != 124 || ctx.Err() != nil {
-		t.Fatalf("expected bounded timeout status, got %v: %s", err, out)
+	for _, delayedStartup := range []bool{false, true} {
+		t.Run("delayed-startup="+strconv.FormatBool(delayedStartup), func(t *testing.T) {
+			dir := t.TempDir()
+			fixture(t, dir, "hanging", "for (;;) {}", nil)
+			if delayedStartup {
+				// Model cold/contended Node startup without depending on runner
+				// load. Do not delay workers: only the controller initializes late.
+				preload := filepath.Join(dir, "slow-start.cjs")
+				writeWorkspaceFile(t, dir, "slow-start.cjs", `
+if (!process.argv.includes('--worker')) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+}`)
+				t.Setenv("NODE_OPTIONS", "--require="+strconv.Quote(preload))
+			}
+			script := strings.ReplaceAll(GenerateNodeProbeScript([]string{"hanging"}, 3), "/workspace", dir)
+			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+			defer cancel()
+			// Model the real sandbox's deadline beginning before shell/strace/Node
+			// startup. Coverage must be emitted before its outer timeout kills Node.
+			cmd := exec.CommandContext(ctx, "timeout", "3s", "sh", "-c", "sleep 0.2\n"+script)
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			exit, ok := err.(*exec.ExitError)
+			if !ok || exit.ExitCode() != 124 || ctx.Err() != nil {
+				t.Fatalf("expected bounded timeout status, got %v: %s", err, out)
+			}
+			contains(t, string(out), "GOAUDIT_PROBE_PACKAGE_TIMEOUT:hanging:import",
+				"GOAUDIT_PROBE_COVERAGE:hanging:incomplete")
+		})
 	}
-	contains(t, string(out), "GOAUDIT_PROBE_PACKAGE_TIMEOUT:hanging:import",
-		"GOAUDIT_PROBE_COVERAGE:hanging:incomplete")
 }
 
 func executable(t *testing.T, root, rel, source string) {

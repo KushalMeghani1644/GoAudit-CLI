@@ -16,7 +16,6 @@ var (
 	upgradeMode       string
 	managerOverride   string
 	includeTransitive bool
-	mountProject      bool
 	// failOn is defined in scan.go (shared across scan commands).
 )
 
@@ -30,6 +29,7 @@ var suppressedProjectReasons = map[string]bool{
 var scanProjectCmd = &cobra.Command{
 	Use:     "scan-project <path>",
 	Short:   "Scan a JS project by upgrading and installing dependencies in a sandbox",
+	Long:    "Scan a JS project by upgrading and installing dependencies in a sandbox.\nWe never mount your project files. Only manifests: root package.json and supported lockfiles.\nSource files, workspace directories, patches, and .npmrc are never staged.",
 	Args:    cobra.ExactArgs(1),
 	PreRunE: validateRuntimeProbeFlags,
 	Run: func(cmd *cobra.Command, args []string) {
@@ -88,31 +88,19 @@ var scanProjectCmd = &cobra.Command{
 			fmt.Printf("Selected %d direct dependency package(s) for runtime probing\n", len(probePackages))
 		}
 
-		// Stage a sanitized tree so install scripts cannot read real project secrets
-		// via /project-ro (bind-mount remains readable for the whole scan).
-		stage, err := project.StageForSandbox(proj.Root, project.StageOptions{FullTree: mountProject})
+		// Only allowlisted manifests enter the sandbox, never the host tree.
+		stage, err := project.StageForSandbox(proj.Root)
 		if err != nil {
 			reporter.Fatal(err)
 		}
-		if mountProject {
-			f := report.Finding{
-				Severity:   report.SeverityWarning,
-				Type:       "policy",
-				ReasonCode: "PROJECT_TREE_STAGED",
-				Path:       proj.Root,
-				Confidence: 90,
-				Evidence:   "Full project tree staged into sandbox with secret-path redaction; prefer default minimal staging when possible",
-			}
-			findings = append(findings, f)
-			reporter.PrintLiveFinding(f)
-		} else if !ciMode {
-			fmt.Println("Staging minimal install inputs (package.json/lockfiles); use --mount-project for full tree with secret redaction")
+		if !ciMode {
+			fmt.Println("Staging only root package.json and supported lockfiles; source files and .npmrc are never staged")
 		}
 
 		profile := profileForManager(proj.Manager)
 		if warmCache {
 			err := warmSandboxCache(context.Background(), profile, reporter, pipelineOptions{
-				projectPath:     proj.Root,
+				projectPath:     stage.Dir,
 				scanProjectMode: true,
 				probePackages:   probePackages,
 			})
@@ -163,7 +151,6 @@ func init() {
 	scanProjectCmd.Flags().StringVar(&upgradeMode, "upgrade-mode", "refresh-lock", "Upgrade strategy: refresh-lock, ncu, or update")
 	scanProjectCmd.Flags().StringVar(&managerOverride, "manager", "", "Force package manager: npm, pnpm, or bun")
 	scanProjectCmd.Flags().BoolVar(&includeTransitive, "include-transitive", false, "Also registry-check packages from the manager's lockfile (package-lock.json, pnpm-lock.yaml, or bun.lock)")
-	scanProjectCmd.Flags().BoolVar(&mountProject, "mount-project", false, "Stage full project tree into the sandbox (secret paths redacted); default stages only manifests/lockfiles")
 	scanProjectCmd.Flags().BoolVar(&noCache, "no-cache", false, "Disable sandbox caching for this run (no warm container is stored)")
 	scanProjectCmd.Flags().StringVar(&cacheDir, "cache-dir", "", "Custom directory for sandbox cache (or set GOAUDIT_CACHE_DIR)")
 	scanProjectCmd.Flags().StringVar(&failOn, "fail-on", "never", "Exit non-zero on: never, malicious, inconclusive, or malicious,inconclusive")

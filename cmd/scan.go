@@ -28,7 +28,6 @@ var (
 	targetTimeout string
 	probeTimeout  string
 	failOn        string
-	mountCwd      bool
 )
 
 type scanProfile struct {
@@ -41,6 +40,7 @@ type scanProfile struct {
 var scanCmd = &cobra.Command{
 	Use:   "scan <install-command>",
 	Short: "Scan an npm, pnpm, or bun install command in a gVisor sandbox",
+	Long:  "Scan an npm, pnpm, or bun install command in a gVisor sandbox.\nLocal directories expose only root package.json and supported lockfiles, never source files or .npmrc.\nMultiple or unsupported local paths do not mount the working directory.",
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
 			return fmt.Errorf("an npm, pnpm, or bun install command is required")
@@ -57,11 +57,10 @@ var scanCmd = &cobra.Command{
 
 		runtimeTargetCmd, projectPath, localFindings := prepareLocalPackageInstall(targetCmd)
 
-		// When mounting a local package (or CWD), stage a secret-redacted copy so
-		// /project-ro never exposes real .env / keys / tokens from the host tree.
+		// Local packages use the same manifests-only policy as scan-project.
 		var cleanupStage func()
 		if projectPath != "" {
-			stage, err := project.StageForSandbox(projectPath, project.StageOptions{FullTree: true})
+			stage, err := project.StageForSandbox(projectPath)
 			if err != nil {
 				reporter.Fatal(err)
 			}
@@ -169,32 +168,9 @@ func prepareLocalPackageInstall(targetCmd string) (string, string, []report.Find
 	if rewritten, path, ok := analyzer.RewriteSingleLocalPackageInstall(targetCmd); ok {
 		return rewritten, path, nil
 	}
-	// Multi/unsupported local specs: refuse CWD mount by default so install scripts
-	// cannot read arbitrary host secrets. Opt in with --mount-cwd.
-	if !mountCwd {
-		return targetCmd, "", []report.Finding{{
-			Severity:   report.SeverityWarning,
-			Type:       "runtime",
-			ReasonCode: "LOCAL_PACKAGE_REWRITE_UNAVAILABLE",
-			Path:       targetCmd,
-			Confidence: 80,
-			Evidence:   "local package install contains multiple or unsupported local path specs; refusing to mount the working directory (pass --mount-cwd to override)",
-		}}
-	}
-	wd, err := os.Getwd()
-	if err != nil {
-		return targetCmd, "", []report.Finding{localPackageRewriteUnavailableFinding(targetCmd, err.Error())}
-	}
-	return targetCmd, wd, []report.Finding{
-		localPackageRewriteUnavailableFinding(targetCmd, "local package install contains multiple or unsupported local path specs; mounted the current working directory without rewriting the command (--mount-cwd)"),
-		{
-			Severity:   report.SeverityWarning,
-			Type:       "policy",
-			ReasonCode: "PROJECT_TREE_STAGED",
-			Path:       wd,
-			Confidence: 90,
-			Evidence:   "Current working directory was copied into a secret-redacted stage and that stage is bind-mounted into the sandbox",
-		},
+	// Multi/unsupported local specs never expose the caller's working directory.
+	return targetCmd, "", []report.Finding{
+		localPackageRewriteUnavailableFinding(targetCmd, "local package install contains multiple or unsupported local path specs; the working directory is never mounted and local sources are unavailable unless already present in the sandbox image"),
 	}
 }
 
@@ -234,6 +210,5 @@ func init() {
 	scanCmd.Flags().StringVar(&targetTimeout, "timeout", "", "Maximum time for the install/target command (default: profile-based)")
 	scanCmd.Flags().StringVar(&probeTimeout, "probe-timeout", "30s", "Maximum time for runtime probe")
 	scanCmd.Flags().StringVar(&failOn, "fail-on", "never", "Exit non-zero on: never, malicious, inconclusive, or malicious,inconclusive")
-	scanCmd.Flags().BoolVar(&mountCwd, "mount-cwd", false, "Allow mounting the current working directory for multi-local package installs (secret-redacted stage)")
 	rootCmd.AddCommand(scanCmd)
 }

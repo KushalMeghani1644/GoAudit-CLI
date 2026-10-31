@@ -7,7 +7,9 @@ import (
 	"testing"
 
 	"github.com/KushalMeghani1644/GoAudit-CLI/internal/parser"
+	"github.com/KushalMeghani1644/GoAudit-CLI/internal/project"
 	"github.com/KushalMeghani1644/GoAudit-CLI/internal/sandbox"
+	"github.com/spf13/cobra"
 )
 
 func TestInferProfileForPackageManagers(t *testing.T) {
@@ -123,19 +125,30 @@ func TestPrepareLocalPackageInstallRewritesSingleLocalPackage(t *testing.T) {
 	if len(findings) != 0 {
 		t.Fatalf("unexpected findings: %#v", findings)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "index.js"), []byte("source must not be staged"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stage, err := project.StageForSandbox(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stage.Cleanup()
+	entries, err := os.ReadDir(stage.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "package.json" {
+		t.Fatalf("local package stage must contain only package.json, got %v", entries)
+	}
 }
 
-func TestPrepareLocalPackageInstallRefusesMultiLocalWithoutMountCwd(t *testing.T) {
-	prev := mountCwd
-	mountCwd = false
-	defer func() { mountCwd = prev }()
-
+func TestPrepareLocalPackageInstallRefusesMultiLocal(t *testing.T) {
 	runtimeCmd, projectPath, findings := prepareLocalPackageInstall("npm install ./one ./two")
 	if runtimeCmd != "npm install ./one ./two" {
 		t.Fatalf("unexpected runtime command: %s", runtimeCmd)
 	}
 	if projectPath != "" {
-		t.Fatalf("expected empty project path without --mount-cwd, got %q", projectPath)
+		t.Fatalf("expected no working directory mount, got %q", projectPath)
 	}
 	if len(findings) != 1 {
 		t.Fatalf("expected one warning, got %#v", findings)
@@ -143,43 +156,31 @@ func TestPrepareLocalPackageInstallRefusesMultiLocalWithoutMountCwd(t *testing.T
 	if findings[0].ReasonCode != "LOCAL_PACKAGE_REWRITE_UNAVAILABLE" {
 		t.Fatalf("unexpected reason: %s", findings[0].ReasonCode)
 	}
-	if !strings.Contains(findings[0].Evidence, "--mount-cwd") {
+	if !strings.Contains(findings[0].Evidence, "never mounted") || strings.Contains(findings[0].Evidence, "--mount-cwd") {
 		t.Fatalf("unexpected evidence: %s", findings[0].Evidence)
 	}
 }
 
-func TestPrepareLocalPackageInstallMountCwdFallback(t *testing.T) {
-	prev := mountCwd
-	mountCwd = true
-	defer func() { mountCwd = prev }()
-
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	runtimeCmd, projectPath, findings := prepareLocalPackageInstall("npm install ./one ./two")
-	if runtimeCmd != "npm install ./one ./two" {
-		t.Fatalf("unexpected runtime command: %s", runtimeCmd)
-	}
-	if projectPath != wd {
-		t.Fatalf("unexpected project path: %s", projectPath)
-	}
-	if len(findings) < 1 {
-		t.Fatalf("expected warnings, got %#v", findings)
-	}
-	foundRewrite := false
-	foundMount := false
-	for _, f := range findings {
-		if f.ReasonCode == "LOCAL_PACKAGE_REWRITE_UNAVAILABLE" {
-			foundRewrite = true
-		}
-		if f.ReasonCode == "PROJECT_TREE_STAGED" {
-			foundMount = true
-		}
-	}
-	if !foundRewrite || !foundMount {
-		t.Fatalf("expected rewrite + mount warnings, got %#v", findings)
+func TestManifestsOnlyCLI(t *testing.T) {
+	for _, original := range []*cobra.Command{scanCmd, scanProjectCmd} {
+		t.Run(original.Name(), func(t *testing.T) {
+			help := original.Long + original.UsageString()
+			for _, want := range []string{"package.json", "lockfiles", ".npmrc"} {
+				if !strings.Contains(help, want) {
+					t.Fatalf("help missing %q:\n%s", want, help)
+				}
+			}
+			for _, flag := range []string{"mount-project", "mount-cwd"} {
+				if original.Flags().Lookup(flag) != nil || strings.Contains(help, "--"+flag) {
+					t.Fatalf("removed flag %s is still registered or documented", flag)
+				}
+				cmd := &cobra.Command{Use: original.Use}
+				cmd.Flags().AddFlagSet(original.Flags())
+				if err := cmd.ParseFlags([]string{"--" + flag}); err == nil || !strings.Contains(err.Error(), "unknown flag") {
+					t.Fatalf("expected unknown flag for %s, got %v", flag, err)
+				}
+			}
+		})
 	}
 }
 

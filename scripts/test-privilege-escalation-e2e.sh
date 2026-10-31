@@ -2,20 +2,34 @@
 set -euo pipefail
 
 CLI=${GOAUDIT_BIN:-./goaudit}
-IMAGE=${GOAUDIT_NODE_IMAGE:-goaudit-node-sandbox:ci}
+IMAGE=${GOAUDIT_NODE_IMAGE:-goaudit-e2e:ci}
 FIXTURES=${GOAUDIT_PRIVILEGE_FIXTURES:-testdata/privilege-escalation}
 
 run_fixture() {
   local fixture=$1
   local expected_verdict=$2
   local expected_reason=$3
-  local output
+  local output project
 
   output=$(mktemp)
-  trap 'rm -f "$output"' RETURN
-  "$CLI" scan "npm install --userconfig=/dev/null ./$FIXTURES/$fixture" \
+  project=$(mktemp -d)
+  trap 'rm -f "$output"; rm -rf "$project"' RETURN
+  # Fixture code lives only in the test image; stage a manifest, not its tree.
+  python3 - "$FIXTURES/$fixture/package.json" "$fixture" "$project" <<'PY'
+import json
+import pathlib
+import sys
+
+source, fixture, destination = sys.argv[1:]
+name = json.loads(pathlib.Path(source).read_text())["name"]
+manifest = {"name": "goaudit-e2e-project", "version": "1.0.0", "private": True,
+            "dependencies": {name: f"file:/opt/goaudit-e2e/privilege-escalation/{fixture}.tgz"}}
+(pathlib.Path(destination) / "package.json").write_text(json.dumps(manifest))
+PY
+  "$CLI" scan-project "$project" --manager=npm \
     --ci \
     --no-cache \
+    --offline \
     --network=off \
     --node-image="$IMAGE" >"$output"
 
