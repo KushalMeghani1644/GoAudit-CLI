@@ -237,9 +237,12 @@ function run(command, args, deadline, pkg = null) {
 
 async function controller() {
     // The sandbox's outer timeout starts before Node and strace initialization.
-    // Leave time to kill groups and emit coverage before that failsafe fires.
+    // Charge Node startup against the shell's budget, not against the reserve
+    // for killing groups and emitting coverage before that failsafe fires.
+    const startedAtMS = Number(process.argv[2]);
+    if (!Number.isSafeInteger(startedAtMS) || startedAtMS <= 0) throw new Error('invalid_probe_start_time');
     const cleanupReserve = Math.min(1000, Math.floor(timeoutMS / 4));
-    const deadline = Date.now() + timeoutMS - cleanupReserve;
+    const deadline = startedAtMS + timeoutMS - cleanupReserve;
     let timedOut = false;
     process.on('SIGTERM', () => { cleanup(); mark('TIMEOUT'); process.exit(124); });
     process.on('SIGINT', () => { cleanup(); process.exit(130); });

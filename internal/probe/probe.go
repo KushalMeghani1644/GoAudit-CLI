@@ -24,11 +24,14 @@ func GenerateNodeProbeScript(packages []string, timeoutSec int) string {
 	}
 	pkgJSON, _ := json.Marshal(packages)
 	var b strings.Builder
-	b.WriteString("\ncat << 'GOAUDIT_PROBE_EOF' > /workspace/.goaudit_probe.cjs\n")
+	// Start the budget before writing the controller and initializing Node;
+	// startup must not consume the time reserved for reporting coverage.
+	b.WriteString("\nGOAUDIT_PROBE_STARTED_MS=$(date +%s%3N)\n")
+	b.WriteString("cat << 'GOAUDIT_PROBE_EOF' > /workspace/.goaudit_probe.cjs\n")
 	source := strings.Replace(nodeProbeSource, "/*GOAUDIT_CONFIG*/", fmt.Sprintf("const packages = %s;\nconst timeoutMS = %d;", pkgJSON, int64(timeoutSec)*1000), 1)
 	b.WriteString(source)
 	b.WriteString("\nGOAUDIT_PROBE_EOF\n")
 	// Failsafe for the trusted controller; it cleans worker groups on SIGTERM.
-	fmt.Fprintf(&b, "NODE_PATH=/workspace/node_modules timeout --signal=TERM --kill-after=1s %d node /workspace/.goaudit_probe.cjs\n", timeoutSec+2)
+	fmt.Fprintf(&b, "NODE_PATH=/workspace/node_modules timeout --signal=TERM --kill-after=1s %d node /workspace/.goaudit_probe.cjs \"$GOAUDIT_PROBE_STARTED_MS\"\n", timeoutSec+2)
 	return b.String()
 }
