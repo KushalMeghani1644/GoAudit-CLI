@@ -24,9 +24,9 @@ func GenerateNodeProbeScript(packages []string, timeoutSec int) string {
 	}
 	pkgJSON, _ := json.Marshal(packages)
 	var b strings.Builder
-	// Start the budget before writing the controller and initializing Node;
-	// startup must not consume the time reserved for reporting coverage.
-	b.WriteString("\nGOAUDIT_PROBE_STARTED_MS=$(date +%s%3N)\n")
+	// The sandbox supplies the watchdog's start time. Standalone callers fall
+	// back to shell entry, still charging Node startup against the budget.
+	b.WriteString("\nGOAUDIT_PROBE_STARTED_MS=${GOAUDIT_PROBE_STARTED_MS:-$(date +%s%3N)}\n")
 	b.WriteString("cat << 'GOAUDIT_PROBE_EOF' > /workspace/.goaudit_probe.cjs\n")
 	source := strings.Replace(nodeProbeSource, "/*GOAUDIT_CONFIG*/", fmt.Sprintf("const packages = %s;\nconst timeoutMS = %d;", pkgJSON, int64(timeoutSec)*1000), 1)
 	b.WriteString(source)

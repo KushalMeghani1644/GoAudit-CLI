@@ -237,8 +237,8 @@ function run(command, args, deadline, pkg = null) {
 
 async function controller() {
     // The sandbox's outer timeout starts before Node and strace initialization.
-    // Charge Node startup against the shell's budget, not against the reserve
-    // for killing groups and emitting coverage before that failsafe fires.
+    // Charge wrapper/Node startup against the watchdog's budget, not against
+    // the reserve for killing groups and emitting coverage.
     const startedAtMS = Number(process.argv[2]);
     if (!Number.isSafeInteger(startedAtMS) || startedAtMS <= 0) throw new Error('invalid_probe_start_time');
     const cleanupReserve = Math.min(1000, Math.floor(timeoutMS / 4));

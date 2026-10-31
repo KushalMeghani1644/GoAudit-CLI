@@ -17,7 +17,7 @@ func TestGenerateNodeProbeScript(t *testing.T) {
 		t.Fatalf("nil packages: %q", got)
 	}
 	script := GenerateNodeProbeScript([]string{"@scope/pkg", "lodash"}, 0)
-	for _, want := range []string{`"@scope/pkg"`, `"lodash"`, "timeoutMS = 15000", ".goaudit_probe.cjs", "NODE_PATH=/workspace/node_modules", "--kill-after=1s 17", "GOAUDIT_PROBE_STARTED_MS=$(date +%s%3N)", `"$GOAUDIT_PROBE_STARTED_MS"`} {
+	for _, want := range []string{`"@scope/pkg"`, `"lodash"`, "timeoutMS = 15000", ".goaudit_probe.cjs", "NODE_PATH=/workspace/node_modules", "--kill-after=1s 17", "GOAUDIT_PROBE_STARTED_MS=${GOAUDIT_PROBE_STARTED_MS:-$(date +%s%3N)}", `"$GOAUDIT_PROBE_STARTED_MS"`} {
 		if !strings.Contains(script, want) {
 			t.Errorf("missing %q", want)
 		}

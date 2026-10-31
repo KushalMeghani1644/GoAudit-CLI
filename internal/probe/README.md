@@ -14,12 +14,13 @@ detached process group. The controller SIGKILLs that group on timeout **and**
 on normal/early exit, so inherited grandchildren cannot outlive the attempt.
 Bins remain reachable if the import fails, exits, or hangs.
 
-A whole-probe deadline is anchored in the generated shell before Node
-initialization, so slow startup consumes execution time rather than the reporting
-reserve. The shell uses GNU `date +%s%3N` to pass its start time to the controller.
-It reserves up to one second (at most a quarter of the budget) for cleanup and
-reporting before the sandbox's outer timeout, which starts before Node
-initialization. The remainder is divided fairly among
+A whole-probe deadline is anchored before the sandbox's outer watchdog starts.
+The tracing wrapper captures GNU `date +%s%3N` and passes the timestamp explicitly
+through `runuser` and its login shell to the controller, so strace/user-switching
+and Node startup consume execution time rather than the reporting reserve.
+Standalone generated scripts without a supplied timestamp fall back to shell
+entry. The controller reserves up to one second (at most a quarter of the budget)
+for cleanup and reporting before the outer timeout. The remainder is divided fairly among
 remaining packages. A package
 with bins reserves half of its remaining budget for importing/exercising/
 observing, and divides the remainder among its bins. Unused time can benefit
