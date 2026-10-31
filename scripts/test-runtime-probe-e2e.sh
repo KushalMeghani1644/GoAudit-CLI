@@ -2,30 +2,46 @@
 set -euo pipefail
 
 CLI=${GOAUDIT_BIN:-./goaudit}
-IMAGE=${GOAUDIT_NODE_IMAGE:-goaudit-node-sandbox:ci}
+IMAGE=${GOAUDIT_NODE_IMAGE:-goaudit-e2e:ci}
 FIXTURES=${GOAUDIT_RUNTIME_FIXTURES:-testdata/runtime-probe}
 
 run_fixture() {
   local fixture=$1
   local mode=$2
-  local output
+  local output project
   local -a probe_flags=()
-  local -a scan_command=(
-    scan "npm install --userconfig=/dev/null --offline --no-audit --no-fund ./$FIXTURES/$fixture"
-  )
   if [[ "$mode" != off ]]; then
     probe_flags+=(--runtime-probe)
   fi
-  if [[ "$mode" == continuation ]]; then
-    # Stage just this fixture's tree so its contained file: dependencies exist.
-    scan_command=(scan-project "$FIXTURES/$fixture" --manager=npm --mount-project)
-  fi
 
   output=$(mktemp)
-  trap 'rm -f "$output"' RETURN
-  # Never import fixture code on the host. GoAudit stages this one fixture and
-  # executes it with synthetic credentials under its required runsc runtime.
-  "$CLI" "${scan_command[@]}" \
+  project=$(mktemp -d)
+  trap 'rm -f "$output"; rm -rf "$project"' RETURN
+  # Only this generated manifest enters the stage. Fixture source is packaged
+  # in the test-only image, never mounted from the host or executed on it.
+  python3 - "$FIXTURES/$fixture" "$fixture" "$mode" "$project" <<'PY'
+import json
+import pathlib
+import sys
+
+source, fixture, mode, destination = sys.argv[1:]
+source = pathlib.Path(source)
+packages = [source]
+if mode == "continuation":
+    packages = [source / "packages" / name for name in ("hanging", "following")]
+dependencies = {}
+for package in packages:
+    name = json.loads((package / "package.json").read_text())["name"]
+    relative = package.relative_to(source)
+    archive = f"/opt/goaudit-e2e/runtime-probe/{fixture}"
+    if relative != pathlib.Path("."):
+        archive += "/" + relative.as_posix()
+    dependencies[name] = "file:" + archive + ".tgz"
+manifest = {"name": "goaudit-e2e-project", "version": "1.0.0", "private": True,
+            "dependencies": dependencies}
+(pathlib.Path(destination) / "package.json").write_text(json.dumps(manifest))
+PY
+  "$CLI" scan-project "$project" --manager=npm \
     --ci \
     --no-cache \
     --offline \

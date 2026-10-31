@@ -3,140 +3,196 @@ package project
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
+	"sort"
+	"strings"
 	"testing"
 )
 
-func TestStageForSandboxMinimalExcludesSecrets(t *testing.T) {
+func TestStageForSandboxOnlyAllowlistedInputs(t *testing.T) {
 	root := t.TempDir()
-	mustWrite(t, filepath.Join(root, "package.json"), `{"name":"app","version":"1.0.0"}`)
-	mustWrite(t, filepath.Join(root, "package-lock.json"), `{"lockfileVersion":3}`)
-	mustWrite(t, filepath.Join(root, ".env"), `SECRET=real`)
-	mustWrite(t, filepath.Join(root, ".npmrc"), `//registry.npmjs.org/:_authToken=real-token`)
-	mustWrite(t, filepath.Join(root, ".yarnrc"), `npmAuthToken: real-token`)
-	mustWrite(t, filepath.Join(root, ".yarnrc.yml"), `npmAuthToken: real-token`)
-	mustWrite(t, filepath.Join(root, "src", "index.js"), `console.log(1)`)
-	mustWrite(t, filepath.Join(root, "patches", "foo.patch"), `diff`)
+	// Keep the expected list independent of the implementation: expanding the
+	// allowlist must require an explicit change to this security regression.
+	inputs := map[string]string{
+		"package.json":        `{"name":"app","version":"1.0.0"}`,
+		"package-lock.json":   `{"lockfileVersion":3}`,
+		"npm-shrinkwrap.json": `{"lockfileVersion":3}`,
+		"pnpm-lock.yaml":      "lockfileVersion: '9.0'\n",
+		"bun.lock":            `{"lockfileVersion":1}`,
+		"bun.lockb":           "\x00\x01binary-lock\xff",
+	}
+	for name, content := range inputs {
+		mustWrite(t, filepath.Join(root, name), content)
+	}
+	for _, name := range []string{
+		".env", ".env.local", ".npmrc", ".yarnrc", ".yarnrc.yml", "yarn.lock",
+		"pnpm-workspace.yaml", "private-notes.txt", "credentials-with-an-unusual-name",
+		"src/index.js", "patches/ordinary.txt", "patches/package.json",
+		".yarn/releases/yarn.cjs", "packages/child/package.json",
+		"node_modules/pkg/package.json", ".git/config", ".ssh/id_rsa",
+	} {
+		mustWrite(t, filepath.Join(root, name), "must never be staged")
+	}
 
-	stage, err := StageForSandbox(root, StageOptions{FullTree: false})
+	stage, err := StageForSandbox(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stage.Cleanup()
-
-	if !fileExists(filepath.Join(stage.Dir, "package.json")) {
-		t.Fatal("expected package.json in stage")
+	if stage.Dir == root {
+		t.Fatal("must mount a temporary stage, not the original project")
 	}
-	if !fileExists(filepath.Join(stage.Dir, "package-lock.json")) {
-		t.Fatal("expected package-lock.json in stage")
+	entries, err := os.ReadDir(stage.Dir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !fileExists(filepath.Join(stage.Dir, "patches", "foo.patch")) {
-		t.Fatal("expected patches in minimal stage")
-	}
-	if fileExists(filepath.Join(stage.Dir, ".env")) {
-		t.Fatal("minimal stage must not include .env")
-	}
-	if fileExists(filepath.Join(stage.Dir, ".npmrc")) {
-		t.Fatal("minimal stage must not include .npmrc")
-	}
-	for _, name := range []string{".yarnrc", ".yarnrc.yml"} {
-		if fileExists(filepath.Join(stage.Dir, name)) {
-			t.Fatalf("minimal stage must not include %s", name)
+	var got, want []string
+	for _, entry := range entries {
+		got = append(got, entry.Name())
+		if !entry.Type().IsRegular() {
+			t.Fatalf("stage contains non-regular input %s", entry.Name())
 		}
 	}
-	if fileExists(filepath.Join(stage.Dir, "src", "index.js")) {
-		t.Fatal("minimal stage must not include full source tree")
+	for name, content := range inputs {
+		want = append(want, name)
+		data, err := os.ReadFile(filepath.Join(stage.Dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(data) != content {
+			t.Fatalf("%s contents changed: %q", name, data)
+		}
+	}
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("staged files = %v, want exactly %v", got, want)
+	}
+	stage.Cleanup()
+	stage.Cleanup() // Cleanup is safe to call more than once.
+	if _, err := os.Stat(stage.Dir); !os.IsNotExist(err) {
+		t.Fatalf("stage was not cleaned up: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "package.json"))
+	if err != nil || string(data) != inputs["package.json"] {
+		t.Fatalf("host manifest was modified: %q, %v", data, err)
 	}
 }
 
-func TestStageForSandboxMinimalSkipsSymlinkedInputs(t *testing.T) {
+func TestStageForSandboxWithoutLockfiles(t *testing.T) {
 	root := t.TempDir()
-	external := t.TempDir()
 	mustWrite(t, filepath.Join(root, "package.json"), `{"name":"app"}`)
-	mustWrite(t, filepath.Join(external, "package-lock.json"), `{"lockfileVersion":3}`)
-	mustWrite(t, filepath.Join(external, "escape.patch"), `diff`)
-	if err := os.Symlink(filepath.Join(external, "package-lock.json"), filepath.Join(root, "package-lock.json")); err != nil {
+	stage, err := StageForSandbox(root)
+	if err != nil {
 		t.Fatal(err)
+	}
+	defer stage.Cleanup()
+	entries, err := os.ReadDir(stage.Dir)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "package.json" {
+		t.Fatalf("expected only package.json, got %v, %v", entries, err)
+	}
+}
+
+func TestStageForSandboxSkipsSymlinkedInputs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation can require elevated permissions")
+	}
+	root, external := t.TempDir(), t.TempDir()
+	mustWrite(t, filepath.Join(root, "package.json"), `{"name":"app"}`)
+	mustWrite(t, filepath.Join(external, "secret"), "not a lockfile")
+	for _, name := range []string{"package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "bun.lock", "bun.lockb"} {
+		if err := os.Symlink(filepath.Join(external, "secret"), filepath.Join(root, name)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.Symlink(external, filepath.Join(root, "patches")); err != nil {
 		t.Fatal(err)
 	}
-
-	stage, err := StageForSandbox(root, StageOptions{FullTree: false})
+	stage, err := StageForSandbox(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stage.Cleanup()
-
-	if fileExists(filepath.Join(stage.Dir, "package-lock.json")) {
-		t.Fatal("minimal stage must not follow lockfile symlinks")
+	entries, err := os.ReadDir(stage.Dir)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "package.json" {
+		t.Fatalf("symlinked inputs must not be staged: %v, %v", entries, err)
 	}
-	if fileExists(filepath.Join(stage.Dir, "patches", "escape.patch")) {
-		t.Fatal("minimal stage must not follow directory symlinks")
+	if err := os.Remove(filepath.Join(root, "package.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(external, "secret"), filepath.Join(root, "package.json")); err != nil {
+		t.Fatal(err)
+	}
+	if stage, err := StageForSandbox(root); err == nil || stage != nil {
+		t.Fatalf("symlinked package.json must fail: %v, %v", stage, err)
 	}
 }
 
-func TestStageForSandboxFullTreeRedactsSecrets(t *testing.T) {
+func TestStageForSandboxInvalidInputsCleanUp(t *testing.T) {
+	for _, kind := range []string{"missing root", "file root", "missing manifest", "directory manifest"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			temp := t.TempDir()
+			t.Setenv("TMPDIR", temp)
+			t.Setenv("TMP", temp)
+			t.Setenv("TEMP", temp)
+			switch kind {
+			case "missing root":
+				root = filepath.Join(root, "missing")
+			case "file root":
+				root = filepath.Join(root, "file")
+				mustWrite(t, root, "not a directory")
+			case "directory manifest":
+				if err := os.Mkdir(filepath.Join(root, "package.json"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stage, err := StageForSandbox(root)
+			if err == nil || stage != nil {
+				t.Fatalf("expected failure, got %v, %v", stage, err)
+			}
+			entries, err := os.ReadDir(temp)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("failed stage leaked temporary files: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestStageForSandboxCopyFailureCleansUp(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires Unix file permissions enforced for an unprivileged user")
+	}
+	root, temp := t.TempDir(), t.TempDir()
+	t.Setenv("TMPDIR", temp)
+	mustWrite(t, filepath.Join(root, "package.json"), `{"name":"app"}`)
+	lock := filepath.Join(root, "package-lock.json")
+	mustWrite(t, lock, "{}")
+	if err := os.Chmod(lock, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(lock, 0o644) })
+	stage, err := StageForSandbox(root)
+	if err == nil || stage != nil || !strings.Contains(err.Error(), "copy package-lock.json") {
+		t.Fatalf("expected copy failure, got %v, %v", stage, err)
+	}
+	entries, err := os.ReadDir(temp)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("partial stage was not removed: %v, %v", entries, err)
+	}
+}
+
+func TestStageForSandboxSkipsDirectoryLockfile(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "package.json"), `{"name":"app"}`)
-	mustWrite(t, filepath.Join(root, "src", "index.js"), `console.log(1)`)
-	mustWrite(t, filepath.Join(root, ".env"), `SECRET=real`)
-	mustWrite(t, filepath.Join(root, ".env.local"), `SECRET=real`)
-	mustWrite(t, filepath.Join(root, "certs", "server.pem"), `PEM`)
-	mustWrite(t, filepath.Join(root, ".ssh", "id_rsa"), `KEY`)
-	mustWrite(t, filepath.Join(root, ".aws", "credentials"), `aws`)
-	mustWrite(t, filepath.Join(root, ".npmrc"), `token=x`)
-	_ = os.MkdirAll(filepath.Join(root, "node_modules", "lodash"), 0o755)
-	mustWrite(t, filepath.Join(root, "node_modules", "lodash", "index.js"), `module.exports=1`)
-	_ = os.MkdirAll(filepath.Join(root, ".git"), 0o755)
-	mustWrite(t, filepath.Join(root, ".git", "config"), `git`)
-
-	stage, err := StageForSandbox(root, StageOptions{FullTree: true})
+	mustWrite(t, filepath.Join(root, "bun.lock", "secret"), "do not traverse")
+	stage, err := StageForSandbox(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stage.Cleanup()
-
-	if !fileExists(filepath.Join(stage.Dir, "package.json")) {
-		t.Fatal("expected package.json")
-	}
-	if !fileExists(filepath.Join(stage.Dir, "src", "index.js")) {
-		t.Fatal("expected source in full tree stage")
-	}
-	for _, bad := range []string{
-		".env",
-		".env.local",
-		filepath.Join("certs", "server.pem"),
-		filepath.Join(".ssh", "id_rsa"),
-		filepath.Join(".aws", "credentials"),
-		".npmrc",
-		filepath.Join("node_modules", "lodash", "index.js"),
-		filepath.Join(".git", "config"),
-	} {
-		if fileExists(filepath.Join(stage.Dir, bad)) {
-			t.Fatalf("full tree stage must not include secret/excluded path %s", bad)
-		}
-	}
-}
-
-func TestIsSecretPath(t *testing.T) {
-	cases := []struct {
-		rel, base string
-		want      bool
-	}{
-		{".env", ".env", true},
-		{".env.production", ".env.production", true},
-		{"src/index.js", "index.js", false},
-		{".ssh/id_rsa", "id_rsa", true},
-		{".aws/credentials", "credentials", true},
-		{".yarnrc", ".yarnrc", true},
-		{".yarnrc.yml", ".yarnrc.yml", true},
-		{"certs/server.pem", "server.pem", true},
-		{"readme.md", "readme.md", false},
-	}
-	for _, tt := range cases {
-		if got := isSecretPath(tt.rel, tt.base); got != tt.want {
-			t.Errorf("isSecretPath(%q, %q) = %v, want %v", tt.rel, tt.base, got, tt.want)
-		}
+	if _, err := os.Lstat(filepath.Join(stage.Dir, "bun.lock")); !os.IsNotExist(err) {
+		t.Fatalf("directory lockfile must not enter stage: %v", err)
 	}
 }
 

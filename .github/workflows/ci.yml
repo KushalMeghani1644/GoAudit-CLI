@@ -103,8 +103,14 @@ jobs:
       - name: Build node sandbox image
         run: docker build --pull -t goaudit-node-sandbox:ci -f docker/Dockerfile.node-sandbox .
 
+      - name: Build test-only fixture image
+        run: docker build -t goaudit-e2e:ci -f docker/Dockerfile.e2e .
+
       - name: Build CLI
         run: go build -trimpath -o ./goaudit ./cmd/goaudit
+
+      - name: Test manifests-only staging
+        run: ./scripts/test-project-staging-e2e.sh
 
       - name: Test privilege escalation fixtures
         run: ./scripts/test-privilege-escalation-e2e.sh
