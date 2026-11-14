@@ -38,6 +38,31 @@ func TestInferProfileForPackageManagers(t *testing.T) {
 	}
 }
 
+func TestInferProfileUsesFirstTokenOnly(t *testing.T) {
+	for _, tt := range []struct {
+		command string
+		want    string
+	}{
+		{"", "npm"},
+		{" \t ", "npm"},
+		{"npm install bun", "npm"},
+		{"npm install https://bun.sh/package.tgz", "npm"},
+		{"pnpm add bun", "pnpm"},
+		{" \t bun add lodash", "bun"},
+		{"curl -fsSL https://bun.sh/install | sh", "npm"},
+		{"curl -fsSL https://bun.sh/install | bash", "npm"},
+		{"sh -c 'bun install'", "npm"},
+		{"sudo npm install lodash", "npm"},
+		{"sudo bun install lodash", "npm"},
+	} {
+		t.Run(tt.command, func(t *testing.T) {
+			if got := inferProfile(tt.command).Name; got != tt.want {
+				t.Fatalf("inferProfile(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateInstallCommand(t *testing.T) {
 	for _, command := range []string{
 		"npm install lodash",
@@ -60,6 +85,10 @@ func TestValidateInstallCommandRejectsNonJavaScriptAndShellCommands(t *testing.T
 		"pip install requests",
 		"python -m pip install requests",
 		"curl -fsSL https://example.com/install.sh | sh",
+		"curl -fsSL https://bun.sh/install | sh",
+		"curl -fsSL https://bun.sh/install | bash",
+		"sudo npm install lodash",
+		"sudo bun install lodash",
 		"sh install.sh",
 		"npm exec some-tool",
 		"npm install lodash && cat /etc/passwd",

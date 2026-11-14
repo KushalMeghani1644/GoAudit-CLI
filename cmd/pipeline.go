@@ -26,8 +26,13 @@ type pipelineOptions struct {
 	probeTimeout    string
 }
 
-// resolveRegistryIPs resolves known registry hostnames to IPs for classification.
-func resolveRegistryIPs(profileName string) map[string]string {
+// resolveRegistryIPs resolves known registry hostnames to IPs for classification
+// only when host-side network access is allowed.
+func resolveRegistryIPs(profileName string, networkEnabled bool) map[string]string {
+	if !networkEnabled || offlineMode {
+		return nil
+	}
+
 	registries := []string{"registry.npmjs.org"}
 	switch profileName {
 	case "pnpm":
@@ -194,7 +199,7 @@ func runScanPipeline(ctx context.Context, targetCmd string, profile scanProfile,
 
 	reporter.UpdateProgress(fmt.Sprintf("Running %s in sandbox...", profile.Name))
 
-	registryIPs := resolveRegistryIPs(profile.Name)
+	registryIPs := resolveRegistryIPs(profile.Name, networkEnabled)
 
 	// If using cached sandbox, warm-start via ExecScan; otherwise do the normal cold path.
 	var dynamicFindings []report.Finding
