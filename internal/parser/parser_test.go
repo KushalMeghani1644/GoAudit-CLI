@@ -1,11 +1,54 @@
 package parser
 
 import (
+	"context"
+	"fmt"
+	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/KushalMeghani1644/GoAudit-CLI/internal/report"
 )
+
+func TestParseStreamDoesNotResolveUnknownHosts(t *testing.T) {
+	var dnsCalls atomic.Int32
+	original := net.DefaultResolver
+	net.DefaultResolver = &net.Resolver{
+		PreferGo: true,
+		Dial: func(context.Context, string, string) (net.Conn, error) {
+			dnsCalls.Add(1)
+			return nil, fmt.Errorf("DNS must not be used while parsing")
+		},
+	}
+	t.Cleanup(func() { net.DefaultResolver = original })
+
+	for _, tt := range []struct {
+		ip      string
+		connect string
+	}{
+		{"8.8.8.8", `connect(7, {sa_family=AF_INET, sin_port=htons(443), sin_addr=inet_addr("8.8.8.8")}, 16) = 0`},
+		{"2001:4860:4860::8888", `connect(7, {sa_family=AF_INET6, sin6_port=htons(443), inet_pton(AF_INET6, "2001:4860:4860::8888", &sin6_addr)}, 28) = 0`},
+	} {
+		t.Run(tt.ip, func(t *testing.T) {
+			logs := "GOAUDIT_RUNTIME_META:phase=target\n" + tt.connect + "\n" +
+				`sendto(7, "secret", 6, MSG_NOSIGNAL, NULL, 0) = 6` + "\n"
+			findings, _ := parseWithHealth(t, logs, ParseOptions{})
+			for _, reason := range []string{"EXTERNAL_NETWORK", "DATA_EXFIL"} {
+				f := findByReason(findings, reason)
+				if f == nil {
+					t.Fatalf("expected %s finding", reason)
+				}
+				if f.Host != tt.ip || f.IP != tt.ip || f.Port != 443 {
+					t.Fatalf("expected raw IP and port in %s, got %+v", reason, f)
+				}
+			}
+		})
+	}
+	if got := dnsCalls.Load(); got != 0 {
+		t.Fatalf("parser made %d DNS calls, want none", got)
+	}
+}
 
 func TestParseStreamDetectsRuntimeMissingTool(t *testing.T) {
 	rep := report.NewReporter(true, false)

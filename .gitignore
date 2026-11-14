@@ -4,3 +4,4 @@ AGENTS.md
 # Build artifacts
 /goaudit
 /cmd/goaudit/goaudit
+/dist/

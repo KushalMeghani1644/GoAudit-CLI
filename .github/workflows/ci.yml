@@ -56,6 +56,9 @@ jobs:
       - name: Check module graph
         run: go list -mod=readonly ./...
 
+      - name: Check dependency hygiene
+        run: go mod tidy -diff
+
       - name: Vet
         run: go vet ./...
 

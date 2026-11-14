@@ -610,7 +610,9 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 			}
 			seen[dedupKey] = true
 
-			// Classify: known registry or unknown host
+			// Classify using supplied registry mappings only. Keep unknown hosts
+			// as IPs: reverse DNS would block streaming and make host-side
+			// network requests even for offline scans.
 			host := ipStr
 			reasonCode := "EXTERNAL_NETWORK"
 			severity := report.SeverityWarning
@@ -626,10 +628,6 @@ func ParseStreamWithHealth(r io.Reader, reporter *report.Reporter, opts ParseOpt
 			} else if ip != nil && (ip.IsPrivate() || ip.IsLinkLocalUnicast()) {
 				reasonCode = "INTERNAL_NETWORK"
 				severity = report.SeverityWarning
-			} else {
-				if names, err := net.LookupAddr(ipStr); err == nil && len(names) > 0 {
-					host = strings.TrimSuffix(names[0], ".")
-				}
 			}
 			fd := parseConnectFD(line)
 			// A failed connect does not establish an output FD. A successful

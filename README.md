@@ -144,7 +144,7 @@ Common flags (both `scan` and `scan-project` unless noted):
 | `--runtime-probe` | Opt in to post-install runtime probing (default: off) |
 | `--skip-probe` | Deprecated compatibility no-op; probing is already off by default |
 | `--fail-on` | Exit non-zero on `malicious`, `inconclusive`, or both (default: `never`) |
-| `--warm-cache` | Prepare the sandbox without running a scan |
+| `--warm-cache` | Prepare the sandbox without running a scan (`scan` only; no staged local project) |
 | `--no-cache` | Do not store a warm container after this run |
 | `--timeout` | Max time for the install command |
 | `--probe-timeout` | Max time for the runtime probe (default: 30s) |
@@ -288,9 +288,13 @@ incomplete probe as evidence that a package is safe.
 GoAudit caches prepared sandbox containers to speed up repeat scans. Each warm container is atomically claimed for one target, destroyed after that scan, and replaced with a clean container so target-mutated state is never reused.
 
 ```zsh
+goaudit scan "npm install lodash" --warm-cache
 goaudit cache status
 goaudit cache clean
 ```
+
+`--warm-cache` is not supported for `scan-project` or local-directory installs
+that stage project manifests. Warm a non-project `scan` as shown above instead.
 
 Use `--cache-dir` or `GOAUDIT_CACHE_DIR` to store cache entries elsewhere. Target commands and runtime probes always execute as an unprivileged sandbox user.
 

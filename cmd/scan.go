@@ -186,14 +186,13 @@ func localPackageRewriteUnavailableFinding(targetCmd, evidence string) report.Fi
 }
 
 func inferProfile(cmd string) scanProfile {
-	switch strings.Fields(cmd)[0] {
-	case "pnpm":
-		return profileForManager("pnpm")
-	case "bun":
-		return profileForManager("bun")
-	default:
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
 		return profileForManager("npm")
 	}
+	// Validation rejects wrappers and shell programs. Only argv[0], never
+	// package names or URLs in the arguments, selects the sandbox profile.
+	return profileForManager(fields[0])
 }
 
 func init() {
